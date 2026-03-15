@@ -24,6 +24,7 @@ from aimealplanner.infrastructure.db.repositories import (
 from aimealplanner.infrastructure.db.session import build_engine, build_session_factory
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
 from aimealplanner.infrastructure.redis.client import build_redis, verify_redis
+from aimealplanner.presentation.telegram.commands import build_public_bot_commands
 from aimealplanner.presentation.telegram.router import build_router
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,7 @@ async def run() -> None:
     try:
         await verify_database_connection(runtime.engine)
         await verify_redis(runtime.redis)
+        await runtime.bot.set_my_commands(build_public_bot_commands())
         reminder_task = asyncio.create_task(runtime.reminder_scheduler.run_forever())
         logger.info("Starting bot in %s mode", runtime.settings.app_env)
         await runtime.dispatcher.start_polling(runtime.bot)

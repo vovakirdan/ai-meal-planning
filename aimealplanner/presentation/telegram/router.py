@@ -3,6 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
+from aimealplanner.presentation.telegram.handlers.help import (
+    build_help_router,
+)
 from aimealplanner.presentation.telegram.handlers.onboarding import (
     build_onboarding_router,
 )
@@ -33,6 +36,7 @@ def build_router(
     recipe_hint_provider: SpoonacularRecipeHintProvider | None,
 ) -> Router:
     router = Router(name="root")
+    router.include_router(build_help_router())
     router.include_router(build_onboarding_router(session_factory))
     router.include_router(build_settings_router(session_factory))
     router.include_router(
