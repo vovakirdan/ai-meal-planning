@@ -46,6 +46,17 @@ from aimealplanner.application.planning.replacement_service import (
     DishReplacementService,
 )
 from aimealplanner.application.planning.service import PlanningService
+from aimealplanner.application.planning.shopping_dto import (
+    ShoppingListItemDraft,
+    ShoppingListResult,
+    ShoppingSourceContext,
+    ShoppingSourceIngredientEntry,
+    ShoppingSourcePantryEntry,
+)
+from aimealplanner.application.planning.shopping_service import (
+    ShoppingListService,
+    render_shopping_list,
+)
 
 __all__ = [
     "DishPolicyService",
@@ -75,5 +86,12 @@ __all__ = [
     "ReviewDaySession",
     "ReviewQueueEntry",
     "ReviewStartContext",
+    "ShoppingListItemDraft",
+    "ShoppingListResult",
+    "ShoppingListService",
+    "ShoppingSourceContext",
+    "ShoppingSourceIngredientEntry",
+    "ShoppingSourcePantryEntry",
     "WeeklyPlanGenerationService",
+    "render_shopping_list",
 ]

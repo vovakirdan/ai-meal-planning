@@ -11,6 +11,8 @@ from aimealplanner.application.planning.generation_dto import (
     WeeklyPlanGenerationContext,
 )
 from aimealplanner.infrastructure.ai.openai_client import (
+    _build_chat_completion_payload,
+    _build_retry_payload_for_error_text,
     _parse_adjustment_payload,
     _parse_feedback_comment_payload,
     _parse_recipe_details_payload,
@@ -18,6 +20,49 @@ from aimealplanner.infrastructure.ai.openai_client import (
     _parse_week_plan_payload,
 )
 from aimealplanner.infrastructure.db.enums import RepeatabilityMode
+
+
+def test_build_chat_completion_payload_omits_temperature_for_gpt_5_family() -> None:
+    payload = _build_chat_completion_payload(
+        model="chatgpt/gpt-5.3-codex-spark",
+        system_prompt="system",
+        user_prompt="user",
+    )
+
+    assert payload["model"] == "chatgpt/gpt-5.3-codex-spark"
+    assert payload["max_completion_tokens"] == 5000
+    assert "max_tokens" not in payload
+    assert "temperature" not in payload
+
+
+def test_build_chat_completion_payload_keeps_temperature_for_non_gpt_5_models() -> None:
+    payload = _build_chat_completion_payload(
+        model="gpt-4.1-mini",
+        system_prompt="system",
+        user_prompt="user",
+    )
+
+    assert payload["temperature"] == 0.7
+    assert payload["max_completion_tokens"] == 5000
+
+
+def test_build_retry_payload_for_error_text_strips_unsupported_optional_params() -> None:
+    payload = {
+        "model": "chatgpt/gpt-5.4",
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "max_completion_tokens": 5000,
+    }
+
+    retry_payload = _build_retry_payload_for_error_text(
+        payload,
+        ("UnsupportedParamsError: gpt-5 models don't support temperature=0.7 or top_p=0.9"),
+    )
+
+    assert retry_payload == {
+        "model": "chatgpt/gpt-5.4",
+        "max_completion_tokens": 5000,
+    }
 
 
 def _build_generation_context() -> WeeklyPlanGenerationContext:

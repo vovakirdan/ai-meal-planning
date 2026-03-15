@@ -5,8 +5,9 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from aimealplanner.application.planning.browsing_dto import StoredPlanItemView
@@ -28,6 +29,14 @@ from aimealplanner.core.config import Settings
 from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict
 
 logger = logging.getLogger(__name__)
+_OPTIONAL_CHAT_COMPLETION_PARAMS = (
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "logprobs",
+    "top_logprobs",
+)
 
 
 class _GeneratedMealItemModel(BaseModel):
@@ -318,20 +327,80 @@ class OpenAIWeeklyPlanGenerator:
         system_prompt: str,
         user_prompt: str,
     ) -> str:
-        response = await self._client.chat.completions.create(
+        payload = _build_chat_completion_payload(
             model=self._model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.7,
-            max_tokens=5000,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
         )
+        try:
+            response = await self._client.chat.completions.create(**payload)
+        except BadRequestError as err:
+            retry_payload = _build_retry_payload_for_error_text(payload, str(err))
+            if retry_payload is None:
+                raise
+            removed_params = sorted(set(payload) - set(retry_payload))
+            logger.warning(
+                "retrying chat completion for model=%s without unsupported params: %s",
+                self._model,
+                ", ".join(removed_params),
+            )
+            response = await self._client.chat.completions.create(**retry_payload)
         content = response.choices[0].message.content
         if not content:
             raise ValueError("AI returned an empty response")
         return content
+
+
+def _build_chat_completion_payload(
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "max_completion_tokens": 5000,
+    }
+    if _supports_chat_temperature(model):
+        payload["temperature"] = 0.7
+    return payload
+
+
+def _build_retry_payload_for_error_text(
+    payload: dict[str, Any],
+    error_text: str,
+) -> dict[str, Any] | None:
+    unsupported_params = _extract_unsupported_params(error_text)
+    if not unsupported_params:
+        return None
+
+    retry_payload = dict(payload)
+    removed_any = False
+    for param_name in unsupported_params:
+        if param_name in retry_payload:
+            retry_payload.pop(param_name)
+            removed_any = True
+
+    return retry_payload if removed_any else None
+
+
+def _supports_chat_temperature(model: str) -> bool:
+    model_slug = model.strip().lower().split("/")[-1]
+    return not model_slug.startswith("gpt-5")
+
+
+def _extract_unsupported_params(error_text: str) -> set[str]:
+    normalized_error = error_text.lower()
+    return {
+        param_name
+        for param_name in _OPTIONAL_CHAT_COMPLETION_PARAMS
+        if param_name in normalized_error
+    }
 
 
 _SYSTEM_PROMPT = """

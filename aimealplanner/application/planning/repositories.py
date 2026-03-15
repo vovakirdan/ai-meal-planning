@@ -31,6 +31,11 @@ from aimealplanner.application.planning.generation_dto import (
 from aimealplanner.application.planning.replacement_dto import (
     PlannedMealItemReplacement,
 )
+from aimealplanner.application.planning.shopping_dto import (
+    ShoppingListItemDraft,
+    ShoppingListResult,
+    ShoppingSourceContext,
+)
 from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict
 
 
@@ -144,6 +149,18 @@ class WeeklyPlanRepository(Protocol):
         raw_comment: str | None,
         normalized_notes: dict[str, object],
     ) -> None: ...
+
+    async def get_shopping_source(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+    ) -> ShoppingSourceContext | None: ...
+
+    async def create_shopping_list(
+        self,
+        weekly_plan_id: UUID,
+        items: list[ShoppingListItemDraft],
+    ) -> ShoppingListResult: ...
 
 
 @dataclass(frozen=True, slots=True)

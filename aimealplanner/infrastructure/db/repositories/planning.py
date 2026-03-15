@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -41,6 +42,13 @@ from aimealplanner.application.planning.replacement_dto import (
     PlannedMealItemReplacement,
 )
 from aimealplanner.application.planning.repositories import PlanningRepositories
+from aimealplanner.application.planning.shopping_dto import (
+    ShoppingListItemDraft,
+    ShoppingListResult,
+    ShoppingSourceContext,
+    ShoppingSourceIngredientEntry,
+    ShoppingSourcePantryEntry,
+)
 from aimealplanner.infrastructure.db.enums import (
     DishFeedbackVerdict,
     MealSlot,
@@ -67,6 +75,10 @@ from aimealplanner.infrastructure.db.models.plan import (
     PlannedMealRecord,
     WeeklyPlanRecord,
 )
+from aimealplanner.infrastructure.db.models.shopping import (
+    ShoppingListItemRecord,
+    ShoppingListRecord,
+)
 from aimealplanner.infrastructure.db.models.user import UserRecord
 
 _MEAL_SLOT_ORDER = {
@@ -78,6 +90,9 @@ _MEAL_SLOT_ORDER = {
     MealSlot.DESSERT.value: 5,
 }
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+_SHOPPING_LIST_DISPLAY_NAME_MAX_LENGTH = 255
+_SHOPPING_LIST_QUANTITY_UNIT_MAX_LENGTH = 32
+_SHOPPING_LIST_CATEGORY_MAX_LENGTH = 64
 
 
 class SqlAlchemyPlanningUserRepository:
@@ -725,6 +740,183 @@ class SqlAlchemyWeeklyPlanRepository:
             ],
         )
 
+    async def get_shopping_source(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+    ) -> ShoppingSourceContext | None:
+        plan_statement = (
+            select(WeeklyPlanRecord)
+            .options(
+                selectinload(WeeklyPlanRecord.planned_meals).selectinload(
+                    PlannedMealRecord.items,
+                ),
+            )
+            .where(
+                WeeklyPlanRecord.id == weekly_plan_id,
+                WeeklyPlanRecord.household_id == household_id,
+                WeeklyPlanRecord.status.in_(
+                    [WeeklyPlanStatus.DRAFT, WeeklyPlanStatus.CONFIRMED],
+                ),
+            )
+        )
+        plan = await self._session.scalar(plan_statement)
+        if plan is None:
+            return None
+
+        for meal in plan.planned_meals:
+            for item in meal.items:
+                if item.dish_id is not None:
+                    continue
+                if _extract_snapshot_ingredients(item.snapshot_payload):
+                    continue
+                dish = await self._find_or_create_dish_from_item(item)
+                item.dish_id = dish.id
+        await self._session.flush()
+
+        refreshed_plan_statement = (
+            select(WeeklyPlanRecord)
+            .options(
+                selectinload(WeeklyPlanRecord.planned_meals)
+                .selectinload(PlannedMealRecord.items)
+                .selectinload(PlannedMealItemRecord.dish)
+                .selectinload(DishRecord.ingredients)
+                .selectinload(DishIngredientRecord.ingredient),
+            )
+            .where(
+                WeeklyPlanRecord.id == weekly_plan_id,
+                WeeklyPlanRecord.household_id == household_id,
+            )
+        )
+        refreshed_plan = await self._session.scalar(refreshed_plan_statement)
+        if refreshed_plan is None:
+            return None
+
+        pantry_statement = (
+            select(PantryItemRecord)
+            .options(selectinload(PantryItemRecord.ingredient))
+            .where(PantryItemRecord.household_id == household_id)
+        )
+        pantry_items = list(await self._session.scalars(pantry_statement))
+
+        ingredient_entries: list[ShoppingSourceIngredientEntry] = []
+        for meal in refreshed_plan.planned_meals:
+            for item in meal.items:
+                snapshot_entries = await self._build_snapshot_shopping_entries(item)
+                if snapshot_entries:
+                    ingredient_entries.extend(snapshot_entries)
+                    continue
+                dish = item.dish
+                if dish is None:
+                    continue
+                for dish_ingredient in dish.ingredients:
+                    ingredient_entries.append(
+                        ShoppingSourceIngredientEntry(
+                            ingredient_id=dish_ingredient.ingredient_id,
+                            canonical_name=dish_ingredient.ingredient.canonical_name,
+                            shopping_category=dish_ingredient.ingredient.shopping_category,
+                            default_unit=dish_ingredient.ingredient.default_unit,
+                            amount_text=_extract_amount_text(dish_ingredient),
+                            quantity_value=dish_ingredient.quantity_value,
+                            quantity_unit=dish_ingredient.quantity_unit,
+                            preparation_note=dish_ingredient.preparation_note,
+                            dish_name=item.snapshot_name,
+                        ),
+                    )
+
+        return ShoppingSourceContext(
+            weekly_plan_id=refreshed_plan.id,
+            start_date=refreshed_plan.start_date,
+            end_date=refreshed_plan.end_date,
+            ingredient_entries=ingredient_entries,
+            pantry_entries=[
+                ShoppingSourcePantryEntry(
+                    ingredient_id=pantry_item.ingredient_id,
+                    stock_level=pantry_item.stock_level,
+                    quantity_value=pantry_item.quantity_value,
+                    quantity_unit=pantry_item.quantity_unit,
+                    note=pantry_item.note,
+                )
+                for pantry_item in pantry_items
+            ],
+        )
+
+    async def create_shopping_list(
+        self,
+        weekly_plan_id: UUID,
+        items: list[ShoppingListItemDraft],
+    ) -> ShoppingListResult:
+        plan = await self._session.get(WeeklyPlanRecord, weekly_plan_id)
+        if plan is None:
+            raise ValueError("Weekly plan not found")
+
+        version_statement = select(func.max(ShoppingListRecord.version)).where(
+            ShoppingListRecord.weekly_plan_id == weekly_plan_id,
+        )
+        latest_version = await self._session.scalar(version_statement)
+        next_version = (latest_version or 0) + 1
+
+        record = ShoppingListRecord(
+            weekly_plan_id=weekly_plan_id,
+            version=next_version,
+        )
+        self._session.add(record)
+        await self._session.flush()
+
+        for position, item in enumerate(items):
+            quantity_value, quantity_unit = _normalize_shopping_storage_quantity(
+                item.quantity_value,
+                item.quantity_unit,
+            )
+            self._session.add(
+                ShoppingListItemRecord(
+                    shopping_list_id=record.id,
+                    ingredient_id=item.ingredient_id,
+                    position=position,
+                    display_name=item.display_name[:_SHOPPING_LIST_DISPLAY_NAME_MAX_LENGTH],
+                    quantity_value=quantity_value,
+                    quantity_unit=quantity_unit,
+                    category=_truncate_optional_value(
+                        item.category,
+                        _SHOPPING_LIST_CATEGORY_MAX_LENGTH,
+                    ),
+                    availability_status=item.availability_status,
+                    note=_merge_shopping_item_note(item),
+                ),
+            )
+
+        await self._session.flush()
+        return ShoppingListResult(
+            shopping_list_id=record.id,
+            weekly_plan_id=weekly_plan_id,
+            version=next_version,
+            start_date=plan.start_date,
+            end_date=plan.end_date,
+            items=items,
+        )
+
+    async def _build_snapshot_shopping_entries(
+        self,
+        item: PlannedMealItemRecord,
+    ) -> list[ShoppingSourceIngredientEntry]:
+        entries: list[ShoppingSourceIngredientEntry] = []
+        for ingredient_payload in _extract_snapshot_ingredients(item.snapshot_payload):
+            ingredient = await self._get_or_create_ingredient(ingredient_payload["name"])
+            entries.append(
+                ShoppingSourceIngredientEntry(
+                    ingredient_id=ingredient.id,
+                    canonical_name=ingredient.canonical_name,
+                    shopping_category=ingredient.shopping_category,
+                    default_unit=ingredient.default_unit,
+                    amount_text=ingredient_payload.get("amount"),
+                    quantity_value=None,
+                    quantity_unit=None,
+                    preparation_note=ingredient_payload.get("preparation_note"),
+                    dish_name=item.snapshot_name,
+                ),
+            )
+        return entries
+
     async def replace_generated_meals(
         self,
         weekly_plan_id: UUID,
@@ -895,6 +1087,48 @@ def _extract_snapshot_ingredients(snapshot_payload: dict[str, Any]) -> list[dict
             ingredient_payload["preparation_note"] = preparation_note.strip()
         ingredients.append(ingredient_payload)
     return ingredients
+
+
+def _extract_amount_text(dish_ingredient: DishIngredientRecord) -> str | None:
+    metadata_amount = dish_ingredient.metadata_json.get("amount")
+    if isinstance(metadata_amount, str) and metadata_amount.strip():
+        return metadata_amount.strip()
+    if dish_ingredient.quantity_value is not None and dish_ingredient.quantity_unit:
+        return f"{dish_ingredient.quantity_value} {dish_ingredient.quantity_unit}".strip()
+    if dish_ingredient.quantity_unit:
+        return dish_ingredient.quantity_unit.strip()
+    return None
+
+
+def _merge_shopping_item_note(item: ShoppingListItemDraft) -> str | None:
+    if item.note is None:
+        return None
+    if item.quantity_label is None:
+        return item.note
+    return f"Итог: {item.quantity_label}. {item.note}"
+
+
+def _normalize_shopping_storage_quantity(
+    quantity_value: Decimal | None,
+    quantity_unit: str | None,
+) -> tuple[Decimal | None, str | None]:
+    if quantity_unit is None:
+        return quantity_value, None
+    normalized_unit = quantity_unit.strip()
+    if not normalized_unit:
+        return quantity_value, None
+    if len(normalized_unit) > _SHOPPING_LIST_QUANTITY_UNIT_MAX_LENGTH:
+        return None, None
+    return quantity_value, normalized_unit
+
+
+def _truncate_optional_value(value: str | None, max_length: int) -> str | None:
+    if value is None:
+        return None
+    normalized_value = value.strip()
+    if not normalized_value:
+        return None
+    return normalized_value[:max_length]
 
 
 def _extract_suggested_actions(snapshot_payload: dict[str, Any]) -> list[DishQuickAction]:
