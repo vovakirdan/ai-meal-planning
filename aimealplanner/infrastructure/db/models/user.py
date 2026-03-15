@@ -1,29 +1,66 @@
 from __future__ import annotations
 
-from datetime import datetime
-from uuid import UUID, uuid4
+from datetime import time
+from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Index,
+    SmallInteger,
+    String,
+    Time,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from aimealplanner.infrastructure.db.base import Base
+from aimealplanner.infrastructure.db.mixins import TimestampedUUIDMixin
+
+if TYPE_CHECKING:
+    from aimealplanner.infrastructure.db.models.household import HouseholdRecord
 
 
-class UserRecord(Base):
+class UserRecord(TimestampedUUIDMixin, Base):
     __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("telegram_user_id", name="uq_users_telegram_user_id"),)
-
-    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
-    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
+    __table_args__ = (
+        Index(
+            "ix_users_daily_feedback_reminder_schedule",
+            "daily_feedback_reminder_enabled",
+            "daily_feedback_reminder_time",
+        ),
+        Index(
+            "ix_users_weekly_planning_reminder_schedule",
+            "weekly_planning_reminder_enabled",
+            "weekly_planning_reminder_day_of_week",
+            "weekly_planning_reminder_time",
+        ),
+        UniqueConstraint("telegram_user_id", name="uq_users_telegram_user_id"),
+        CheckConstraint(
+            "weekly_planning_reminder_day_of_week BETWEEN 0 AND 6",
+            name="weekly_planning_reminder_day_of_week_range",
+        ),
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Europe/Moscow")
+    daily_feedback_reminder_enabled: Mapped[bool] = mapped_column(
+        Boolean,
         nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
+        default=False,
+    )
+    daily_feedback_reminder_time: Mapped[time | None] = mapped_column(Time(timezone=False))
+    weekly_planning_reminder_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    weekly_planning_reminder_day_of_week: Mapped[int | None] = mapped_column(SmallInteger)
+    weekly_planning_reminder_time: Mapped[time | None] = mapped_column(Time(timezone=False))
+
+    household: Mapped[HouseholdRecord | None] = relationship(
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
     )

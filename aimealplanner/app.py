@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from aimealplanner.core.config import Settings
 from aimealplanner.core.logging import configure_logging
-from aimealplanner.infrastructure.db.initialization import initialize_database
+from aimealplanner.infrastructure.db.initialization import verify_database_connection
 from aimealplanner.infrastructure.db.session import build_engine, build_session_factory
 from aimealplanner.infrastructure.redis.client import build_redis, verify_redis
 from aimealplanner.presentation.telegram.router import build_router
@@ -51,7 +51,7 @@ def build_runtime(settings: Settings | None = None) -> AppRuntime:
 async def run() -> None:
     runtime = build_runtime()
     try:
-        await initialize_database(runtime.engine)
+        await verify_database_connection(runtime.engine)
         await verify_redis(runtime.redis)
         logger.info("Starting bot in %s mode", runtime.settings.app_env)
         await runtime.dispatcher.start_polling(runtime.bot)

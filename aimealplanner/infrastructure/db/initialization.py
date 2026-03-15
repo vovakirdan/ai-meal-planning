@@ -1,11 +1,9 @@
 from __future__ import annotations
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from aimealplanner.infrastructure.db import models  # noqa: F401
-from aimealplanner.infrastructure.db.base import Base
 
-
-async def initialize_database(engine: AsyncEngine) -> None:
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+async def verify_database_connection(engine: AsyncEngine) -> None:
+    async with engine.connect() as connection:
+        await connection.execute(text("SELECT 1"))
