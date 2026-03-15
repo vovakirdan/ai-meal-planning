@@ -4,6 +4,7 @@ from datetime import date
 from uuid import uuid4
 
 from aimealplanner.application.planning.generation_dto import (
+    DishQuickAction,
     GeneratedMeal,
     GeneratedMealItem,
     GeneratedWeekPlan,
@@ -48,6 +49,12 @@ def test_render_generated_week_plan_orders_days_chronologically() -> None:
                         name="Pasta",
                         summary="Short summary",
                         adaptation_notes=[],
+                        suggested_actions=[
+                            DishQuickAction(
+                                label="Легче",
+                                instruction="Сделай блюдо легче.",
+                            ),
+                        ],
                     ),
                 ],
             ),
@@ -60,6 +67,12 @@ def test_render_generated_week_plan_orders_days_chronologically() -> None:
                         name="Oatmeal",
                         summary="Short summary",
                         adaptation_notes=[],
+                        suggested_actions=[
+                            DishQuickAction(
+                                label="Сытнее",
+                                instruction="Сделай блюдо сытнее.",
+                            ),
+                        ],
                     ),
                 ],
             ),

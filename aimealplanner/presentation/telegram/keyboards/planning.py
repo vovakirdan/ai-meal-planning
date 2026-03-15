@@ -13,6 +13,7 @@ NEXT_WEEK_LABEL = "Следующая неделя"
 TODAY_LABEL = "С сегодня"
 TOMORROW_LABEL = "С завтра"
 CUSTOM_DATES_LABEL = "Свои даты"
+REJECT_DISH_REASON_LABEL = "Причина в блюде"
 
 WEEK_MOOD_LABELS = {
     "Азиатская": "Азиатская",
@@ -30,6 +31,9 @@ _PLAN_REPLACE_PREFIX = "pr"
 _PLAN_REPLACE_CHOOSE_PREFIX = "pc"
 _PLAN_ADJUST_PREFIX = "pa"
 _PLAN_CUSTOM_EDIT_PREFIX = "pe"
+_PLAN_POLICY_PREFIX = "pp"
+_PLAN_SUGGESTED_ACTION_PREFIX = "ps"
+_PLAN_REJECT_FLOW_PREFIX = "pn"
 
 
 def build_range_choice_keyboard() -> ReplyKeyboardMarkup:
@@ -51,6 +55,10 @@ def build_week_mood_keyboard() -> ReplyKeyboardMarkup:
             [SKIP_LABEL],
         ],
     )
+
+
+def build_reject_reason_keyboard() -> ReplyKeyboardMarkup:
+    return _keyboard([[REJECT_DISH_REASON_LABEL], ["Отмена"]])
 
 
 def build_plan_days_keyboard(
@@ -135,29 +143,45 @@ def build_plan_item_keyboard(
     meal_date: date,
     planned_meal_id: UUID,
     planned_meal_item_id: UUID,
+    suggested_actions: list[tuple[int, str]],
 ) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="Подобрать замену",
+                callback_data=build_plan_replace_callback(planned_meal_item_id),
+            ),
+        ],
+    ]
+    if suggested_actions:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="Подобрать замену",
-                    callback_data=build_plan_replace_callback(planned_meal_item_id),
-                ),
+                    text=label,
+                    callback_data=build_plan_suggested_action_callback(
+                        planned_meal_item_id,
+                        index,
+                    ),
+                )
+                for index, label in suggested_actions[:2]
             ],
-            [
-                InlineKeyboardButton(
-                    text="Сделать легче",
-                    callback_data=build_plan_adjust_callback(planned_meal_item_id, "lighter"),
-                ),
-                InlineKeyboardButton(
-                    text="Менее острым",
-                    callback_data=build_plan_adjust_callback(planned_meal_item_id, "less_spicy"),
-                ),
-            ],
+        )
+    rows.extend(
+        [
             [
                 InlineKeyboardButton(
                     text="Своя правка",
                     callback_data=build_plan_custom_edit_callback(planned_meal_item_id),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Лайк",
+                    callback_data=build_plan_policy_callback(planned_meal_item_id, "favorite"),
+                ),
+                InlineKeyboardButton(
+                    text="Не предлагать",
+                    callback_data=build_plan_reject_flow_callback(planned_meal_item_id, "ask"),
                 ),
             ],
             [
@@ -176,6 +200,30 @@ def build_plan_item_keyboard(
                 InlineKeyboardButton(
                     text="К дням недели",
                     callback_data=build_plan_week_callback(weekly_plan_id),
+                ),
+            ],
+        ],
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_reject_action_keyboard(planned_meal_item_id: UUID) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Убрать",
+                    callback_data=build_plan_reject_flow_callback(planned_meal_item_id, "remove"),
+                ),
+                InlineKeyboardButton(
+                    text="Заменить",
+                    callback_data=build_plan_reject_flow_callback(planned_meal_item_id, "replace"),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data=build_plan_item_callback(planned_meal_item_id),
                 ),
             ],
         ],
@@ -257,6 +305,18 @@ def build_plan_custom_edit_callback(planned_meal_item_id: UUID) -> str:
     return f"{_PLAN_CUSTOM_EDIT_PREFIX}:{planned_meal_item_id.hex}"
 
 
+def build_plan_policy_callback(planned_meal_item_id: UUID, verdict: str) -> str:
+    return f"{_PLAN_POLICY_PREFIX}:{planned_meal_item_id.hex}:{verdict}"
+
+
+def build_plan_suggested_action_callback(planned_meal_item_id: UUID, index: int) -> str:
+    return f"{_PLAN_SUGGESTED_ACTION_PREFIX}:{planned_meal_item_id.hex}:{index}"
+
+
+def build_plan_reject_flow_callback(planned_meal_item_id: UUID, action: str) -> str:
+    return f"{_PLAN_REJECT_FLOW_PREFIX}:{planned_meal_item_id.hex}:{action}"
+
+
 def parse_plan_week_callback(value: str) -> UUID | None:
     return _parse_uuid_callback(value, prefix=_PLAN_WEEK_PREFIX, expected_parts=2)
 
@@ -320,6 +380,46 @@ def parse_plan_adjust_callback(value: str) -> tuple[UUID, str] | None:
 
 def parse_plan_custom_edit_callback(value: str) -> UUID | None:
     return _parse_uuid_callback(value, prefix=_PLAN_CUSTOM_EDIT_PREFIX, expected_parts=2)
+
+
+def parse_plan_policy_callback(value: str) -> tuple[UUID, str] | None:
+    parts = value.split(":")
+    if len(parts) != 3 or parts[0] != _PLAN_POLICY_PREFIX:
+        return None
+    planned_meal_item_id = _parse_uuid_hex(parts[1])
+    if planned_meal_item_id is None:
+        return None
+    verdict = parts[2].strip()
+    if not verdict:
+        return None
+    return (planned_meal_item_id, verdict)
+
+
+def parse_plan_suggested_action_callback(value: str) -> tuple[UUID, int] | None:
+    parts = value.split(":")
+    if len(parts) != 3 or parts[0] != _PLAN_SUGGESTED_ACTION_PREFIX:
+        return None
+    planned_meal_item_id = _parse_uuid_hex(parts[1])
+    if planned_meal_item_id is None:
+        return None
+    try:
+        index = int(parts[2])
+    except ValueError:
+        return None
+    return (planned_meal_item_id, index)
+
+
+def parse_plan_reject_flow_callback(value: str) -> tuple[UUID, str] | None:
+    parts = value.split(":")
+    if len(parts) != 3 or parts[0] != _PLAN_REJECT_FLOW_PREFIX:
+        return None
+    planned_meal_item_id = _parse_uuid_hex(parts[1])
+    if planned_meal_item_id is None:
+        return None
+    action = parts[2].strip()
+    if not action:
+        return None
+    return (planned_meal_item_id, action)
 
 
 def _parse_uuid_callback(value: str, *, prefix: str, expected_parts: int) -> UUID | None:

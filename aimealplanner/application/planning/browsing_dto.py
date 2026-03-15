@@ -5,6 +5,9 @@ from datetime import date
 from typing import Any
 from uuid import UUID
 
+from aimealplanner.application.planning.generation_dto import DishQuickAction
+from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict
+
 
 @dataclass(frozen=True, slots=True)
 class StoredPlanDaySummary:
@@ -58,9 +61,13 @@ class StoredPlanItemView:
     weekly_plan_id: UUID
     planned_meal_id: UUID
     planned_meal_item_id: UUID
+    dish_id: UUID | None
     meal_date: date
     slot: str
     name: str
     summary: str | None
     adaptation_notes: list[str]
     snapshot_payload: dict[str, Any]
+    suggested_actions: list[DishQuickAction]
+    household_policy_verdict: DishFeedbackVerdict | None
+    household_policy_note: str | None

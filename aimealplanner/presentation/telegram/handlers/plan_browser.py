@@ -15,6 +15,7 @@ from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aimealplanner.application.planning import (
+    DishPolicyService,
     DishReplacementService,
     PlannedMealItemReplacement,
     PlanningBrowsingService,
@@ -25,23 +26,30 @@ from aimealplanner.application.planning.browsing_dto import (
     StoredPlanItemView,
     StoredPlanMealView,
 )
+from aimealplanner.application.planning.generation_dto import DishQuickAction
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
+from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
 from aimealplanner.presentation.telegram.keyboards.onboarding import CANCEL_LABEL, remove_keyboard
 from aimealplanner.presentation.telegram.keyboards.planning import (
+    REJECT_DISH_REASON_LABEL,
     build_plan_day_keyboard,
     build_plan_days_keyboard,
     build_plan_item_keyboard,
     build_plan_meal_keyboard,
+    build_reject_action_keyboard,
+    build_reject_reason_keyboard,
     build_replacement_candidates_keyboard,
-    parse_plan_adjust_callback,
     parse_plan_custom_edit_callback,
     parse_plan_day_callback,
     parse_plan_item_callback,
     parse_plan_meal_callback,
+    parse_plan_policy_callback,
+    parse_plan_reject_flow_callback,
     parse_plan_replace_callback,
     parse_plan_replace_choose_callback,
+    parse_plan_suggested_action_callback,
     parse_plan_week_callback,
 )
 from aimealplanner.presentation.telegram.states.plan_browser import PlanBrowserStates
@@ -55,6 +63,11 @@ def build_plan_browser_router(
 ) -> Router:
     router = Router(name="plan_browser")
     browsing_service = PlanningBrowsingService(session_factory, build_planning_repositories)
+    policy_service = DishPolicyService(
+        session_factory,
+        build_planning_repositories,
+        reason_client=weekly_plan_generator,
+    )
     replacement_service = DishReplacementService(
         session_factory,
         build_planning_repositories,
@@ -191,12 +204,7 @@ def build_plan_browser_router(
         await _edit_callback_message(
             callback,
             text=_render_item_view(item_view),
-            reply_markup=build_plan_item_keyboard(
-                item_view.weekly_plan_id,
-                item_view.meal_date,
-                item_view.planned_meal_id,
-                item_view.planned_meal_item_id,
-            ),
+            reply_markup=_build_item_keyboard(item_view),
         )
 
     @router.callback_query(F.data.startswith("pr:"))
@@ -249,20 +257,29 @@ def build_plan_browser_router(
             answer_callback=False,
         )
 
-    @router.callback_query(F.data.startswith("pa:"))
-    async def handle_plan_adjust_callback(callback: CallbackQuery) -> None:
+    @router.callback_query(F.data.startswith("ps:"))
+    async def handle_plan_suggested_action_callback(callback: CallbackQuery) -> None:
         callback_data = cast(str, callback.data)
-        parsed_value = parse_plan_adjust_callback(callback_data)
+        parsed_value = parse_plan_suggested_action_callback(callback_data)
         if parsed_value is None:
             await callback.answer("Не получилось изменить блюдо.", show_alert=True)
             return
 
-        planned_meal_item_id, action = parsed_value
-        instruction = _resolve_quick_adjustment_instruction(action)
-        if instruction is None:
-            await callback.answer("Такое действие пока не поддерживается.", show_alert=True)
+        planned_meal_item_id, action_index = parsed_value
+        try:
+            item_view = await browsing_service.get_item_view(
+                _require_telegram_user_id_from_callback(callback),
+                planned_meal_item_id,
+            )
+        except ValueError as err:
+            await callback.answer(str(err), show_alert=True)
             return
 
+        if action_index < 0 or action_index >= len(item_view.suggested_actions):
+            await callback.answer("Подсказка для этого блюда устарела.", show_alert=True)
+            return
+
+        instruction = item_view.suggested_actions[action_index].instruction
         message = _require_callback_message(callback)
         await callback.answer("Корректирую блюдо...")
         async with ChatActionSender.typing(
@@ -274,7 +291,7 @@ def build_plan_browser_router(
                     _require_telegram_user_id_from_callback(callback),
                     planned_meal_item_id,
                     instruction,
-                    generation_source=f"ai_adjustment:{action}",
+                    generation_source="ai_adjustment:suggested",
                 )
             except ValueError as err:
                 await message.answer(str(err))
@@ -283,12 +300,7 @@ def build_plan_browser_router(
         await _edit_callback_message(
             callback,
             text=_render_item_view(apply_result.updated_item),
-            reply_markup=build_plan_item_keyboard(
-                apply_result.updated_item.weekly_plan_id,
-                apply_result.updated_item.meal_date,
-                apply_result.updated_item.planned_meal_id,
-                apply_result.updated_item.planned_meal_item_id,
-            ),
+            reply_markup=_build_item_keyboard(apply_result.updated_item),
             answer_callback=False,
         )
 
@@ -319,6 +331,80 @@ def build_plan_browser_router(
                 "Чтобы отменить, отправь /cancel."
             ),
             reply_markup=remove_keyboard(),
+        )
+
+    @router.callback_query(F.data.startswith("pp:"))
+    async def handle_plan_policy_callback(callback: CallbackQuery) -> None:
+        callback_data = cast(str, callback.data)
+        parsed_value = parse_plan_policy_callback(callback_data)
+        if parsed_value is None:
+            await callback.answer("Не получилось сохранить правило для блюда.", show_alert=True)
+            return
+
+        planned_meal_item_id, verdict_value = parsed_value
+        verdict = _parse_policy_verdict(verdict_value)
+        if verdict is None:
+            await callback.answer("Такое правило пока не поддерживается.", show_alert=True)
+            return
+
+        try:
+            update_result = await policy_service.set_household_policy(
+                _require_telegram_user_id_from_callback(callback),
+                planned_meal_item_id,
+                verdict=verdict,
+            )
+        except ValueError as err:
+            await callback.answer(str(err), show_alert=True)
+            return
+
+        await _edit_callback_message(
+            callback,
+            text=_render_item_view(update_result.updated_item),
+            reply_markup=_build_item_keyboard(update_result.updated_item),
+            answer_callback=False,
+        )
+        await callback.answer(_render_policy_toast(verdict))
+
+    @router.callback_query(F.data.startswith("pn:"))
+    async def handle_plan_reject_flow_callback(
+        callback: CallbackQuery,
+        state: FSMContext,
+    ) -> None:
+        callback_data = cast(str, callback.data)
+        parsed_value = parse_plan_reject_flow_callback(callback_data)
+        if parsed_value is None:
+            await callback.answer("Не получилось обработать это действие.", show_alert=True)
+            return
+
+        planned_meal_item_id, action = parsed_value
+        if action == "ask":
+            await _edit_callback_message(
+                callback,
+                text="Что сделать с этим блюдом в текущем плане?",
+                reply_markup=build_reject_action_keyboard(planned_meal_item_id),
+            )
+            return
+
+        if action not in {"remove", "replace"}:
+            await callback.answer("Такое действие пока не поддерживается.", show_alert=True)
+            return
+
+        message = _require_callback_message(callback)
+        await state.set_state(PlanBrowserStates.reject_reason)
+        await state.update_data(
+            reject_item_id=planned_meal_item_id.hex,
+            reject_action=action,
+            reject_message_id=message.message_id,
+            reject_chat_id=message.chat.id,
+        )
+        await callback.answer()
+        await message.answer(
+            (
+                "Почему больше не предлагать это блюдо?\n"
+                "Напиши коротко. Если причина только в самом блюде, так и напиши.\n"
+                "Чтобы отменить, отправь /cancel."
+            ),
+            reply_markup=build_reject_reason_keyboard(),
         )
 
     @router.message(PlanBrowserStates.custom_item_adjustment)
@@ -373,6 +459,105 @@ def build_plan_browser_router(
             reply_markup=remove_keyboard(),
         )
 
+    @router.message(PlanBrowserStates.reject_reason)
+    async def handle_reject_reason(message: Message, state: FSMContext) -> None:
+        try:
+            raw_reason = _require_text(message)
+        except ValueError:
+            await message.answer("Напиши причину обычным текстом или отправь /cancel.")
+            return
+        if raw_reason == "/cancel" or raw_reason == CANCEL_LABEL:
+            await state.clear()
+            await message.answer(
+                "Ок, оставляю блюдо как есть.",
+                reply_markup=remove_keyboard(),
+            )
+            return
+        if raw_reason == REJECT_DISH_REASON_LABEL:
+            raw_reason = "Не подходит именно это блюдо, без новых ограничений для семьи."
+
+        state_data = await state.get_data()
+        planned_meal_item_hex = cast(str | None, state_data.get("reject_item_id"))
+        reject_action = cast(str | None, state_data.get("reject_action"))
+        if planned_meal_item_hex is None or reject_action is None:
+            await state.clear()
+            await message.answer(
+                "Не удалось восстановить контекст. Открой блюдо заново через /week.",
+                reply_markup=remove_keyboard(),
+            )
+            return
+
+        planned_meal_item_id = UUID(hex=planned_meal_item_hex)
+        async with ChatActionSender.typing(
+            bot=_require_message_bot(message),
+            chat_id=message.chat.id,
+        ):
+            try:
+                policy_result = await policy_service.set_household_policy(
+                    _require_telegram_user_id_from_message(message),
+                    planned_meal_item_id,
+                    verdict=DishFeedbackVerdict.NEVER_AGAIN,
+                    raw_reason=raw_reason,
+                )
+            except ValueError as err:
+                await message.answer(str(err))
+                return
+
+        if reject_action == "remove":
+            removal_result = await policy_service.remove_item_from_current_plan(
+                _require_telegram_user_id_from_message(message),
+                planned_meal_item_id,
+            )
+            await state.clear()
+            updated_meal = await browsing_service.get_meal_view(
+                _require_telegram_user_id_from_message(message),
+                removal_result.updated_meal_id,
+            )
+            await _edit_stored_meal_message(
+                message,
+                state_data,
+                updated_meal,
+            )
+            await message.answer(
+                "Блюдо убрал и больше не буду предлагать его семье.",
+                reply_markup=remove_keyboard(),
+            )
+            return
+
+        await state.clear()
+        suggestion_result = await replacement_service.suggest_replacements(
+            _require_telegram_user_id_from_message(message),
+            planned_meal_item_id,
+        )
+        await _store_replacement_candidates(
+            state,
+            planned_meal_item_id=planned_meal_item_id,
+            candidates=suggestion_result.candidates,
+        )
+        await _edit_stored_item_message(
+            message,
+            state_data,
+            policy_result.updated_item,
+            text_override=_render_replacement_candidates(
+                suggestion_result.item_view,
+                suggestion_result.candidates,
+            ),
+            reply_markup_override=build_replacement_candidates_keyboard(
+                planned_meal_item_id=planned_meal_item_id,
+                weekly_plan_id=suggestion_result.item_view.weekly_plan_id,
+                meal_date=suggestion_result.item_view.meal_date,
+                planned_meal_id=suggestion_result.item_view.planned_meal_id,
+                candidates=[
+                    (index, candidate.name)
+                    for index, candidate in enumerate(suggestion_result.candidates)
+                ],
+            ),
+        )
+        await message.answer(
+            "Запомнил это блюдо как нежелательное для семьи. Ниже подобрал замену.",
+            reply_markup=remove_keyboard(),
+        )
+
     @router.callback_query(F.data.startswith("pc:"))
     async def handle_plan_replace_choose_callback(
         callback: CallbackQuery,
@@ -406,6 +591,13 @@ def build_plan_browser_router(
                         "summary": candidate.summary,
                         "replacement_reason": candidate.reason,
                         "generation_source": "ai_replacement",
+                        "suggested_actions": [
+                            {
+                                "label": action.label,
+                                "instruction": action.instruction,
+                            }
+                            for action in candidate.suggested_actions
+                        ],
                     },
                 ),
             )
@@ -417,12 +609,7 @@ def build_plan_browser_router(
         await _edit_callback_message(
             callback,
             text=_render_item_view(apply_result.updated_item),
-            reply_markup=build_plan_item_keyboard(
-                apply_result.updated_item.weekly_plan_id,
-                apply_result.updated_item.meal_date,
-                apply_result.updated_item.planned_meal_id,
-                apply_result.updated_item.planned_meal_item_id,
-            ),
+            reply_markup=_build_item_keyboard(apply_result.updated_item),
         )
 
     return router
@@ -524,6 +711,16 @@ def _render_item_view(item_view: StoredPlanItemView) -> str:
         lines.extend(["", "Адаптации:"])
         lines.extend([f"• {note}" for note in item_view.adaptation_notes])
 
+    if item_view.household_policy_verdict is not None:
+        lines.extend(
+            [
+                "",
+                f"Статус для семьи: {_render_policy_verdict(item_view.household_policy_verdict)}",
+            ],
+        )
+        if item_view.household_policy_note:
+            lines.append(f"Заметка: {item_view.household_policy_note}")
+
     ingredients = item_view.snapshot_payload.get("ingredients")
     if isinstance(ingredients, list) and ingredients:
         lines.extend(["", "Ингредиенты:"])
@@ -615,43 +812,99 @@ def _require_callback_bot(callback: CallbackQuery) -> Bot:
     return callback.bot
 
 
-def _resolve_quick_adjustment_instruction(action: str) -> str | None:
-    quick_actions = {
-        "lighter": "Сделай блюдо легче и менее жирным, сохранив его основную идею.",
-        "less_spicy": "Сделай блюдо менее острым, сохранив вкус и общую идею блюда.",
+def _parse_policy_verdict(value: str) -> DishFeedbackVerdict | None:
+    try:
+        return DishFeedbackVerdict(value)
+    except ValueError:
+        return None
+
+
+def _render_policy_toast(verdict: DishFeedbackVerdict) -> str:
+    if verdict is DishFeedbackVerdict.FAVORITE:
+        return "Сохранил блюдо как любимое для семьи."
+    if verdict is DishFeedbackVerdict.NEVER_AGAIN:
+        return "Больше не буду предлагать это блюдо семье."
+    return "Сохранил правило для блюда."
+
+
+def _render_policy_verdict(verdict: DishFeedbackVerdict) -> str:
+    labels = {
+        DishFeedbackVerdict.FAVORITE: "Любимое",
+        DishFeedbackVerdict.CAN_REPEAT: "Можно повторять",
+        DishFeedbackVerdict.RARELY_REPEAT: "Редко повторять",
+        DishFeedbackVerdict.NEVER_AGAIN: "Не предлагать семье",
     }
-    return quick_actions.get(action)
+    return labels.get(verdict, verdict.value)
+
+
+def _build_item_keyboard(item_view: StoredPlanItemView) -> InlineKeyboardMarkup:
+    return build_plan_item_keyboard(
+        item_view.weekly_plan_id,
+        item_view.meal_date,
+        item_view.planned_meal_id,
+        item_view.planned_meal_item_id,
+        [(index, action.label) for index, action in enumerate(item_view.suggested_actions)],
+    )
 
 
 async def _edit_stored_item_message(
     message: Message,
     state_data: dict[str, object],
     item_view: StoredPlanItemView,
+    *,
+    text_override: str | None = None,
+    reply_markup_override: InlineKeyboardMarkup | None = None,
 ) -> None:
-    chat_id = cast(int | str | None, state_data.get("custom_adjustment_chat_id"))
-    message_id = cast(int | None, state_data.get("custom_adjustment_message_id"))
+    chat_id = cast(
+        int | str | None,
+        state_data.get("custom_adjustment_chat_id") or state_data.get("reject_chat_id"),
+    )
+    message_id = cast(
+        int | None,
+        state_data.get("custom_adjustment_message_id") or state_data.get("reject_message_id"),
+    )
+    text = text_override or _render_item_view(item_view)
+    reply_markup = reply_markup_override or _build_item_keyboard(item_view)
     if chat_id is None or message_id is None:
         await message.answer(
-            _render_item_view(item_view),
-            reply_markup=build_plan_item_keyboard(
-                item_view.weekly_plan_id,
-                item_view.meal_date,
-                item_view.planned_meal_id,
-                item_view.planned_meal_item_id,
-            ),
+            text,
+            reply_markup=reply_markup,
         )
         return
 
     await _require_message_bot(message).edit_message_text(
         chat_id=chat_id,
         message_id=message_id,
-        text=_render_item_view(item_view),
-        reply_markup=build_plan_item_keyboard(
-            item_view.weekly_plan_id,
-            item_view.meal_date,
-            item_view.planned_meal_id,
-            item_view.planned_meal_item_id,
-        ),
+        text=text,
+        reply_markup=reply_markup,
+    )
+
+
+async def _edit_stored_meal_message(
+    message: Message,
+    state_data: dict[str, object],
+    meal_view: StoredPlanMealView,
+) -> None:
+    chat_id = cast(int | str | None, state_data.get("reject_chat_id"))
+    message_id = cast(int | None, state_data.get("reject_message_id"))
+    text = _render_meal_view(meal_view)
+    reply_markup = build_plan_meal_keyboard(
+        meal_view.weekly_plan_id,
+        meal_view.meal_date,
+        [
+            (item.planned_meal_item_id, f"{item.position + 1}. {item.name}")
+            for item in meal_view.items
+        ],
+    )
+    if chat_id is None or message_id is None:
+        await message.answer(text, reply_markup=reply_markup)
+        return
+
+    await _require_message_bot(message).edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        reply_markup=reply_markup,
     )
 
 
@@ -691,6 +944,17 @@ async def _get_replacement_candidate(
         name=cast(str, candidate_payload["name"]),
         summary=cast(str, candidate_payload["summary"]),
         adaptation_notes=cast(list[str], candidate_payload["adaptation_notes"]),
+        suggested_actions=[
+            DishQuickAction(
+                label=cast(str, action_payload["label"]),
+                instruction=cast(str, action_payload["instruction"]),
+            )
+            for action_payload in cast(
+                list[dict[str, object]],
+                candidate_payload.get("suggested_actions", []),
+            )
+            if isinstance(action_payload, dict)
+        ],
         reason=cast(str | None, candidate_payload.get("reason")),
     )
 

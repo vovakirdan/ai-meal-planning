@@ -29,7 +29,7 @@ from aimealplanner.application.planning.repositories import (
     PlanningRepositoryBundleFactory,
     WeeklyPlanRepository,
 )
-from aimealplanner.infrastructure.db.enums import RepeatabilityMode
+from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict, RepeatabilityMode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -125,6 +125,24 @@ class FakeWeeklyPlanRepository:
 
     async def update_item_snapshot(self, replacement: PlannedMealItemReplacement) -> None:
         _ = replacement
+        raise NotImplementedError
+
+    async def ensure_item_dish(
+        self,
+        household_id: UUID,
+        planned_meal_item_id: UUID,
+    ) -> UUID:
+        _ = (household_id, planned_meal_item_id)
+        raise NotImplementedError
+
+    async def upsert_household_dish_policy(
+        self,
+        household_id: UUID,
+        dish_id: UUID,
+        verdict: DishFeedbackVerdict,
+        note: str | None,
+    ) -> None:
+        _ = (household_id, dish_id, verdict, note)
         raise NotImplementedError
 
     async def create_draft(

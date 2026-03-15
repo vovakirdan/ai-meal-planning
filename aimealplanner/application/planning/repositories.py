@@ -28,6 +28,7 @@ from aimealplanner.application.planning.generation_dto import (
 from aimealplanner.application.planning.replacement_dto import (
     PlannedMealItemReplacement,
 )
+from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict
 
 
 class PlanningUserRepository(Protocol):
@@ -75,6 +76,26 @@ class WeeklyPlanRepository(Protocol):
         self,
         replacement: PlannedMealItemReplacement,
     ) -> None: ...
+
+    async def ensure_item_dish(
+        self,
+        household_id: UUID,
+        planned_meal_item_id: UUID,
+    ) -> UUID: ...
+
+    async def upsert_household_dish_policy(
+        self,
+        household_id: UUID,
+        dish_id: UUID,
+        verdict: DishFeedbackVerdict,
+        note: str | None,
+    ) -> None: ...
+
+    async def delete_item(
+        self,
+        household_id: UUID,
+        planned_meal_item_id: UUID,
+    ) -> UUID: ...
 
     async def get_generation_context(
         self,

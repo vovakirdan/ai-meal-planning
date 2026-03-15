@@ -174,6 +174,13 @@ class DishReplacementService:
                     "adjustment_instruction": normalized_instruction,
                     "adjustment_reason": adjusted_item.reason,
                     "generation_source": generation_source,
+                    "suggested_actions": [
+                        {
+                            "label": action.label,
+                            "instruction": action.instruction,
+                        }
+                        for action in adjusted_item.suggested_actions
+                    ],
                 },
             )
 

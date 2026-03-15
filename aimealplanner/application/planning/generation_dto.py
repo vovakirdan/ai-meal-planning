@@ -6,7 +6,11 @@ from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID
 
-from aimealplanner.infrastructure.db.enums import PantryStockLevel, RepeatabilityMode
+from aimealplanner.infrastructure.db.enums import (
+    DishFeedbackVerdict,
+    PantryStockLevel,
+    RepeatabilityMode,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +51,19 @@ class RecipeHint:
 
 
 @dataclass(frozen=True, slots=True)
+class DishQuickAction:
+    label: str
+    instruction: str
+
+
+@dataclass(frozen=True, slots=True)
+class HouseholdDishPolicyContext:
+    dish_name: str
+    verdict: DishFeedbackVerdict
+    note: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class WeeklyPlanGenerationContext:
     weekly_plan_id: UUID
     household_id: UUID
@@ -63,6 +80,7 @@ class WeeklyPlanGenerationContext:
     context_payload: dict[str, Any]
     members: list[PlanningMemberContext]
     pantry_items: list[PlanningPantryItemContext]
+    household_policies: list[HouseholdDishPolicyContext] = field(default_factory=list)
     reference_recipes: list[RecipeHint] = field(default_factory=list)
 
 
@@ -71,6 +89,7 @@ class GeneratedMealItem:
     name: str
     summary: str
     adaptation_notes: list[str]
+    suggested_actions: list[DishQuickAction]
 
 
 @dataclass(frozen=True, slots=True)

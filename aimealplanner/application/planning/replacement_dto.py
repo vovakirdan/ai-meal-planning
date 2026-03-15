@@ -5,6 +5,7 @@ from uuid import UUID
 
 from aimealplanner.application.planning.browsing_dto import StoredPlanItemView
 from aimealplanner.application.planning.generation_dto import (
+    DishQuickAction,
     RecipeHint,
     WeeklyPlanGenerationContext,
 )
@@ -15,6 +16,7 @@ class ReplacementCandidate:
     name: str
     summary: str
     adaptation_notes: list[str]
+    suggested_actions: list[DishQuickAction]
     reason: str | None
 
 
@@ -33,3 +35,4 @@ class PlannedMealItemReplacement:
     summary: str
     adaptation_notes: list[str]
     snapshot_payload: dict[str, object]
+    clear_dish_link: bool = True

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from datetime import date
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
@@ -24,7 +26,9 @@ from aimealplanner.application.planning.dto import (
     StoredPlanningUser,
 )
 from aimealplanner.application.planning.generation_dto import (
+    DishQuickAction,
     GeneratedWeekPlan,
+    HouseholdDishPolicyContext,
     PlanningMemberContext,
     PlanningPantryItemContext,
     WeeklyPlanGenerationContext,
@@ -33,7 +37,18 @@ from aimealplanner.application.planning.replacement_dto import (
     PlannedMealItemReplacement,
 )
 from aimealplanner.application.planning.repositories import PlanningRepositories
-from aimealplanner.infrastructure.db.enums import MealSlot, PlannedMealStatus, WeeklyPlanStatus
+from aimealplanner.infrastructure.db.enums import (
+    DishFeedbackVerdict,
+    MealSlot,
+    PlannedMealStatus,
+    WeeklyPlanStatus,
+)
+from aimealplanner.infrastructure.db.models.dish import (
+    DishIngredientRecord,
+    DishRecipeRecord,
+    DishRecord,
+)
+from aimealplanner.infrastructure.db.models.feedback import HouseholdDishPolicyRecord
 from aimealplanner.infrastructure.db.models.household import (
     HouseholdMemberRecord,
     HouseholdRecord,
@@ -55,6 +70,7 @@ _MEAL_SLOT_ORDER = {
     MealSlot.SNACK_2.value: 4,
     MealSlot.DESSERT.value: 5,
 }
+_WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
 class SqlAlchemyPlanningUserRepository:
@@ -278,6 +294,14 @@ class SqlAlchemyWeeklyPlanRepository:
         if item is None or item.planned_meal.weekly_plan.household_id != household_id:
             return None
 
+        policy = None
+        if item.dish_id is not None:
+            policy_statement = select(HouseholdDishPolicyRecord).where(
+                HouseholdDishPolicyRecord.household_id == household_id,
+                HouseholdDishPolicyRecord.dish_id == item.dish_id,
+            )
+            policy = await self._session.scalar(policy_statement)
+
         summary = item.snapshot_payload.get("summary")
         if summary is not None and not isinstance(summary, str):
             summary = str(summary)
@@ -286,12 +310,16 @@ class SqlAlchemyWeeklyPlanRepository:
             weekly_plan_id=item.planned_meal.weekly_plan_id,
             planned_meal_id=item.planned_meal_id,
             planned_meal_item_id=item.id,
+            dish_id=item.dish_id,
             meal_date=item.planned_meal.meal_date,
             slot=item.planned_meal.slot.value,
             name=item.snapshot_name,
             summary=summary,
             adaptation_notes=list(item.adaptation_notes),
             snapshot_payload=dict(item.snapshot_payload),
+            suggested_actions=_extract_suggested_actions(item.snapshot_payload),
+            household_policy_verdict=policy.verdict if policy is not None else None,
+            household_policy_note=policy.note if policy is not None else None,
         )
 
     async def update_item_snapshot(
@@ -305,7 +333,81 @@ class SqlAlchemyWeeklyPlanRepository:
         record.snapshot_name = replacement.name
         record.snapshot_payload = replacement.snapshot_payload
         record.adaptation_notes = replacement.adaptation_notes
+        if replacement.clear_dish_link:
+            record.dish_id = None
         await self._session.flush()
+
+    async def ensure_item_dish(
+        self,
+        household_id: UUID,
+        planned_meal_item_id: UUID,
+    ) -> UUID:
+        _ = household_id
+        statement = (
+            select(PlannedMealItemRecord)
+            .options(selectinload(PlannedMealItemRecord.dish))
+            .where(PlannedMealItemRecord.id == planned_meal_item_id)
+        )
+        item = await self._session.scalar(statement)
+        if item is None:
+            raise ValueError("Planned meal item not found")
+
+        if item.dish_id is not None:
+            return item.dish_id
+
+        dish = await self._find_or_create_dish_from_item(item)
+        item.dish_id = dish.id
+        await self._session.flush()
+        return dish.id
+
+    async def upsert_household_dish_policy(
+        self,
+        household_id: UUID,
+        dish_id: UUID,
+        verdict: DishFeedbackVerdict,
+        note: str | None,
+    ) -> None:
+        statement = select(HouseholdDishPolicyRecord).where(
+            HouseholdDishPolicyRecord.household_id == household_id,
+            HouseholdDishPolicyRecord.dish_id == dish_id,
+        )
+        record = await self._session.scalar(statement)
+        if record is None:
+            self._session.add(
+                HouseholdDishPolicyRecord(
+                    household_id=household_id,
+                    dish_id=dish_id,
+                    verdict=verdict,
+                    note=note,
+                ),
+            )
+        else:
+            record.verdict = verdict
+            record.note = note
+        await self._session.flush()
+
+    async def delete_item(
+        self,
+        household_id: UUID,
+        planned_meal_item_id: UUID,
+    ) -> UUID:
+        statement = (
+            select(PlannedMealItemRecord)
+            .options(
+                selectinload(PlannedMealItemRecord.planned_meal).selectinload(
+                    PlannedMealRecord.weekly_plan,
+                ),
+            )
+            .where(PlannedMealItemRecord.id == planned_meal_item_id)
+        )
+        record = await self._session.scalar(statement)
+        if record is None or record.planned_meal.weekly_plan.household_id != household_id:
+            raise ValueError("Planned meal item not found")
+
+        planned_meal_id = record.planned_meal_id
+        await self._session.delete(record)
+        await self._session.flush()
+        return planned_meal_id
 
     async def create_draft(
         self,
@@ -366,6 +468,13 @@ class SqlAlchemyWeeklyPlanRepository:
             .order_by(IngredientRecord.canonical_name.asc())
         )
         pantry_rows = list((await self._session.execute(pantry_statement)).all())
+        policy_statement = (
+            select(HouseholdDishPolicyRecord, DishRecord)
+            .join(DishRecord, HouseholdDishPolicyRecord.dish_id == DishRecord.id)
+            .where(HouseholdDishPolicyRecord.household_id == household.id)
+            .order_by(HouseholdDishPolicyRecord.created_at.desc())
+        )
+        policy_rows = list((await self._session.execute(policy_statement)).all())
 
         return WeeklyPlanGenerationContext(
             weekly_plan_id=weekly_plan.id,
@@ -400,6 +509,14 @@ class SqlAlchemyWeeklyPlanRepository:
                 )
                 for pantry_item, ingredient in pantry_rows
             ],
+            household_policies=[
+                HouseholdDishPolicyContext(
+                    dish_name=dish.canonical_name,
+                    verdict=policy.verdict,
+                    note=policy.note,
+                )
+                for policy, dish in policy_rows
+            ],
         )
 
     async def replace_generated_meals(
@@ -432,11 +549,81 @@ class SqlAlchemyWeeklyPlanRepository:
                         snapshot_payload={
                             "summary": item.summary,
                             "generation_source": "weekly_plan_ai",
+                            "suggested_actions": [
+                                {
+                                    "label": action.label,
+                                    "instruction": action.instruction,
+                                }
+                                for action in item.suggested_actions
+                            ],
                         },
                         adaptation_notes=item.adaptation_notes,
                     ),
                 )
         await self._session.flush()
+
+    async def _find_or_create_dish_from_item(self, item: PlannedMealItemRecord) -> DishRecord:
+        normalized_name = _normalize_name(item.snapshot_name)
+        canonical_key = _build_dish_canonical_key(item.snapshot_name, item.snapshot_payload)
+
+        dish_statement = None
+        if canonical_key is not None:
+            dish_statement = select(DishRecord).where(DishRecord.canonical_key == canonical_key)
+        else:
+            dish_statement = select(DishRecord).where(DishRecord.normalized_name == normalized_name)
+
+        dish = await self._session.scalar(dish_statement)
+        if dish is not None:
+            return dish
+
+        summary_value = item.snapshot_payload.get("summary")
+        summary = summary_value.strip() if isinstance(summary_value, str) else None
+        dish = DishRecord(
+            canonical_name=item.snapshot_name,
+            normalized_name=normalized_name,
+            canonical_key=canonical_key,
+            summary=summary,
+        )
+        self._session.add(dish)
+        await self._session.flush()
+
+        recipe = _build_recipe_record(dish.id, item.snapshot_payload)
+        if recipe is not None:
+            self._session.add(recipe)
+
+        snapshot_ingredients = _extract_snapshot_ingredients(item.snapshot_payload)
+        for position, ingredient_payload in enumerate(snapshot_ingredients):
+            ingredient_name = ingredient_payload["name"]
+            ingredient = await self._get_or_create_ingredient(ingredient_name)
+            self._session.add(
+                DishIngredientRecord(
+                    dish_id=dish.id,
+                    ingredient_id=ingredient.id,
+                    position=position,
+                    quantity_unit=ingredient_payload.get("amount"),
+                    preparation_note=ingredient_payload.get("preparation_note"),
+                    metadata_json=dict(ingredient_payload),
+                ),
+            )
+        await self._session.flush()
+        return dish
+
+    async def _get_or_create_ingredient(self, ingredient_name: str) -> IngredientRecord:
+        normalized_name = _normalize_name(ingredient_name)
+        statement = select(IngredientRecord).where(
+            IngredientRecord.normalized_name == normalized_name,
+        )
+        ingredient = await self._session.scalar(statement)
+        if ingredient is not None:
+            return ingredient
+
+        ingredient = IngredientRecord(
+            canonical_name=ingredient_name,
+            normalized_name=normalized_name,
+        )
+        self._session.add(ingredient)
+        await self._session.flush()
+        return ingredient
 
 
 def build_planning_repositories(session: AsyncSession) -> PlanningRepositories:
@@ -449,3 +636,122 @@ def build_planning_repositories(session: AsyncSession) -> PlanningRepositories:
 
 def _sort_meal_record(meal: PlannedMealRecord) -> tuple[int, str]:
     return (_MEAL_SLOT_ORDER.get(meal.slot.value, 999), meal.slot.value)
+
+
+def _normalize_name(value: str) -> str:
+    return _WHITESPACE_PATTERN.sub(" ", value.strip()).lower()
+
+
+def _build_dish_canonical_key(snapshot_name: str, snapshot_payload: dict[str, Any]) -> str | None:
+    normalized_name = _normalize_name(snapshot_name)
+    ingredient_names = [
+        _normalize_name(ingredient["name"])
+        for ingredient in _extract_snapshot_ingredients(snapshot_payload)
+    ]
+    if ingredient_names:
+        joined_ingredients = "|".join(ingredient_names[:4])
+        return f"{normalized_name}::{joined_ingredients}"[:255]
+    if normalized_name:
+        return normalized_name[:255]
+    return None
+
+
+def _extract_snapshot_ingredients(snapshot_payload: dict[str, Any]) -> list[dict[str, str]]:
+    payload = snapshot_payload.get("ingredients")
+    if not isinstance(payload, list):
+        return []
+
+    ingredients: list[dict[str, str]] = []
+    seen_names: set[str] = set()
+    for raw_item in payload:
+        if not isinstance(raw_item, dict):
+            continue
+        name_value = raw_item.get("name")
+        if not isinstance(name_value, str) or not name_value.strip():
+            continue
+        normalized_name = _normalize_name(name_value)
+        if normalized_name in seen_names:
+            continue
+        seen_names.add(normalized_name)
+        ingredient_payload: dict[str, str] = {"name": name_value.strip()}
+        amount_value = raw_item.get("amount")
+        if isinstance(amount_value, str) and amount_value.strip():
+            ingredient_payload["amount"] = amount_value.strip()
+        preparation_note = raw_item.get("preparation_note")
+        if isinstance(preparation_note, str) and preparation_note.strip():
+            ingredient_payload["preparation_note"] = preparation_note.strip()
+        ingredients.append(ingredient_payload)
+    return ingredients
+
+
+def _extract_suggested_actions(snapshot_payload: dict[str, Any]) -> list[DishQuickAction]:
+    payload = snapshot_payload.get("suggested_actions")
+    if not isinstance(payload, list):
+        return []
+
+    actions: list[DishQuickAction] = []
+    seen_labels: set[str] = set()
+    for raw_item in payload:
+        if not isinstance(raw_item, dict):
+            continue
+        label = raw_item.get("label")
+        instruction = raw_item.get("instruction")
+        if not isinstance(label, str) or not isinstance(instruction, str):
+            continue
+        normalized_label = label.strip().casefold()
+        if not normalized_label or not instruction.strip() or normalized_label in seen_labels:
+            continue
+        seen_labels.add(normalized_label)
+        actions.append(
+            DishQuickAction(
+                label=label.strip(),
+                instruction=instruction.strip(),
+            ),
+        )
+    return actions[:2]
+
+
+def _build_recipe_record(
+    dish_id: UUID,
+    snapshot_payload: dict[str, Any],
+) -> DishRecipeRecord | None:
+    preparation_steps = _extract_step_list(snapshot_payload.get("preparation_steps"))
+    cooking_steps = _extract_step_list(snapshot_payload.get("cooking_steps"))
+    serving_steps = _extract_step_list(snapshot_payload.get("serving_steps"))
+    serving_notes = snapshot_payload.get("serving_notes")
+    prep_time_minutes = _coerce_optional_int(snapshot_payload.get("prep_time_minutes"))
+    cook_time_minutes = _coerce_optional_int(snapshot_payload.get("cook_time_minutes"))
+
+    if (
+        not preparation_steps
+        and not cooking_steps
+        and not serving_steps
+        and not isinstance(serving_notes, str)
+        and prep_time_minutes is None
+        and cook_time_minutes is None
+    ):
+        return None
+
+    return DishRecipeRecord(
+        dish_id=dish_id,
+        preparation_steps=preparation_steps,
+        cooking_steps=cooking_steps,
+        serving_steps=serving_steps,
+        prep_time_minutes=prep_time_minutes,
+        cook_time_minutes=cook_time_minutes,
+        serving_notes=serving_notes.strip() if isinstance(serving_notes, str) else None,
+    )
+
+
+def _extract_step_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [step.strip() for step in value if isinstance(step, str) and step.strip()]
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None

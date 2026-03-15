@@ -11,9 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from aimealplanner.application.planning.browsing_dto import StoredPlanItemView
 from aimealplanner.application.planning.generation_dto import (
+    DishQuickAction,
     GeneratedMeal,
     GeneratedMealItem,
     GeneratedWeekPlan,
+    HouseholdDishPolicyContext,
     RecipeHint,
     WeeklyPlanGenerationContext,
 )
@@ -29,6 +31,14 @@ class _GeneratedMealItemModel(BaseModel):
     name: str
     summary: str
     adaptation_notes: list[str] = Field(default_factory=list)
+    suggested_actions: list[_QuickActionModel] = Field(default_factory=list)
+
+
+class _QuickActionModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    instruction: str
 
 
 class _GeneratedMealModel(BaseModel):
@@ -52,6 +62,7 @@ class _ReplacementCandidateModel(BaseModel):
     name: str
     summary: str
     adaptation_notes: list[str] = Field(default_factory=list)
+    suggested_actions: list[_QuickActionModel] = Field(default_factory=list)
     reason: str | None = None
 
 
@@ -59,6 +70,12 @@ class _ReplacementCandidatesModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidates: list[_ReplacementCandidateModel]
+
+
+class _PolicyReasonModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    policy_note: str | None = None
 
 
 @dataclass(slots=True)
@@ -115,14 +132,14 @@ class OpenAIWeeklyPlanGenerator:
             user_prompt=prompt,
         )
         try:
-            return _parse_replacement_payload(raw_content)
+            return _parse_replacement_payload(raw_content, slot=item_view.slot)
         except ValueError as err:
             logger.warning("replacement payload validation failed, attempting repair: %s", err)
             repaired_content = await self._request_json(
                 system_prompt=_REPLACEMENT_SYSTEM_PROMPT,
                 user_prompt=_build_replacement_repair_prompt(raw_content, str(err)),
             )
-            return _parse_replacement_payload(repaired_content)
+            return _parse_replacement_payload(repaired_content, slot=item_view.slot)
 
     async def adjust_item(
         self,
@@ -142,14 +159,41 @@ class OpenAIWeeklyPlanGenerator:
             ),
         )
         try:
-            return _parse_adjustment_payload(raw_content)
+            return _parse_adjustment_payload(raw_content, slot=item_view.slot)
         except ValueError as err:
             logger.warning("adjustment payload validation failed, attempting repair: %s", err)
             repaired_content = await self._request_json(
                 system_prompt=_ADJUSTMENT_SYSTEM_PROMPT,
                 user_prompt=_build_replacement_repair_prompt(raw_content, str(err)),
             )
-            return _parse_adjustment_payload(repaired_content)
+            return _parse_adjustment_payload(repaired_content, slot=item_view.slot)
+
+    async def normalize_policy_reason(
+        self,
+        *,
+        item_view: StoredPlanItemView,
+        generation_context: WeeklyPlanGenerationContext,
+        verdict_label: str,
+        raw_reason: str,
+    ) -> str | None:
+        raw_content = await self._request_json(
+            system_prompt=_POLICY_REASON_SYSTEM_PROMPT,
+            user_prompt=_build_policy_reason_prompt(
+                item_view=item_view,
+                generation_context=generation_context,
+                verdict_label=verdict_label,
+                raw_reason=raw_reason,
+            ),
+        )
+        try:
+            return _parse_policy_reason_payload(raw_content)
+        except ValueError as err:
+            logger.warning("policy reason payload validation failed, attempting repair: %s", err)
+            repaired_content = await self._request_json(
+                system_prompt=_POLICY_REASON_SYSTEM_PROMPT,
+                user_prompt=_build_replacement_repair_prompt(raw_content, str(err)),
+            )
+            return _parse_policy_reason_payload(repaired_content)
 
     async def _request_json(
         self,
@@ -202,9 +246,19 @@ Keep the adjusted dish name, summary, and adaptation notes in Russian.
 """.strip()
 
 
+_POLICY_REASON_SYSTEM_PROMPT = """
+You normalize short household feedback for a Telegram meal planner bot.
+Return valid JSON only.
+Do not use markdown fences.
+Do not add commentary outside the JSON object.
+Write the normalized note in Russian.
+""".strip()
+
+
 def _build_week_plan_prompt(context: WeeklyPlanGenerationContext) -> str:
     pantry_text = "ignore pantry" if not context.pantry_considered else _render_pantry(context)
     reference_recipes_text = _render_reference_recipes(context)
+    policy_text = _render_household_policies(context.household_policies)
     member_lines = "\n".join(
         [
             (
@@ -246,6 +300,9 @@ Week context:
 Household members:
 {member_lines}
 
+Existing household dish memory:
+{policy_text}
+
 Recipe references:
 {reference_recipes_text}
 
@@ -258,6 +315,10 @@ Requirements:
 - It is acceptable to ignore the references if they do not fit the household context well.
 - summary must be one short phrase.
 - adaptation_notes must be an empty list if there are no adaptations.
+- suggested_actions must contain 2 short, context-aware improvement options for this specific dish.
+- suggested_actions must fit the dish and slot.
+- Example: dessert can be less sweet, but not less spicy.
+- Each suggested_actions label should be 1-3 short Russian words for a Telegram button.
 
 Required JSON shape:
 {{
@@ -270,7 +331,13 @@ Required JSON shape:
         {{
           "name": "string",
           "summary": "string",
-          "adaptation_notes": ["string"]
+          "adaptation_notes": ["string"],
+          "suggested_actions": [
+            {{
+              "label": "string",
+              "instruction": "string"
+            }}
+          ]
         }}
       ]
     }}
@@ -332,6 +399,7 @@ def _build_replacement_prompt(
         ],
     )
     references_text = _render_replacement_reference_recipes(reference_recipes)
+    policy_text = _render_household_policies(generation_context.household_policies)
     return f"""
 Suggest 3 replacement dishes for one meal item inside a household weekly plan.
 
@@ -350,6 +418,9 @@ Week context:
 Household:
 {other_constraints}
 
+Existing household dish memory:
+{policy_text}
+
 Optional recipe references:
 {references_text}
 
@@ -361,6 +432,8 @@ Requirements:
 - Prefer practical household dishes over restaurant-style outliers.
 - reason should briefly explain why the replacement fits.
 - adaptation_notes should be an empty list if there are no special adjustments.
+- suggested_actions must contain 2 short, context-aware improvement options
+  for this specific replacement.
 
 Required JSON shape:
 {{
@@ -369,6 +442,12 @@ Required JSON shape:
       "name": "string",
       "summary": "string",
       "adaptation_notes": ["string"],
+      "suggested_actions": [
+        {{
+          "label": "string",
+          "instruction": "string"
+        }}
+      ],
       "reason": "string or null"
     }}
   ]
@@ -384,6 +463,7 @@ def _build_adjustment_prompt(
     reference_recipes: list[RecipeHint],
 ) -> str:
     references_text = _render_replacement_reference_recipes(reference_recipes)
+    policy_text = _render_household_policies(generation_context.household_policies)
     household_lines = "\n".join(
         [
             (
@@ -415,6 +495,9 @@ Week context:
 Household:
 {household_lines}
 
+Existing household dish memory:
+{policy_text}
+
 Optional recipe references:
 {references_text}
 
@@ -425,13 +508,54 @@ Requirements:
 - Prefer practical household cooking over restaurant-style complexity.
 - reason should briefly explain what changed.
 - adaptation_notes should be an empty list if there are no special adjustments.
+- suggested_actions must contain 2 short, context-aware improvement options for the adjusted dish.
 
 Required JSON shape:
 {{
   "name": "string",
   "summary": "string",
   "adaptation_notes": ["string"],
+  "suggested_actions": [
+    {{
+      "label": "string",
+      "instruction": "string"
+    }}
+  ],
   "reason": "string or null"
+}}
+""".strip()
+
+
+def _build_policy_reason_prompt(
+    *,
+    item_view: StoredPlanItemView,
+    generation_context: WeeklyPlanGenerationContext,
+    verdict_label: str,
+    raw_reason: str,
+) -> str:
+    return f"""
+Normalize one household policy note for meal planning memory.
+
+Dish:
+- name: {item_view.name}
+- summary: {item_view.summary or "нет"}
+- slot: {item_view.slot}
+
+Household context:
+{_render_household_members(generation_context)}
+
+Raw user reason:
+- verdict: {verdict_label}
+- reason: {raw_reason}
+
+Requirements:
+- Return a short Russian note for future planning.
+- Preserve broader restrictions only if the user clearly indicated them.
+- If the reason is vague or useless, return null.
+
+Required JSON shape:
+{{
+  "policy_note": "string or null"
 }}
 """.strip()
 
@@ -488,6 +612,11 @@ def _parse_week_plan_payload(
                     adaptation_notes=[
                         note.strip() for note in item.adaptation_notes if note.strip()
                     ],
+                    suggested_actions=_parse_quick_actions(
+                        item.suggested_actions,
+                        slot=meal.slot,
+                        dish_name=name,
+                    ),
                 ),
             )
 
@@ -513,7 +642,7 @@ def _parse_week_plan_payload(
     )
 
 
-def _parse_replacement_payload(raw_content: str) -> list[ReplacementCandidate]:
+def _parse_replacement_payload(raw_content: str, *, slot: str) -> list[ReplacementCandidate]:
     try:
         payload = json.loads(raw_content)
     except json.JSONDecodeError as err:
@@ -544,6 +673,11 @@ def _parse_replacement_payload(raw_content: str) -> list[ReplacementCandidate]:
                 adaptation_notes=[
                     note.strip() for note in candidate.adaptation_notes if note.strip()
                 ],
+                suggested_actions=_parse_quick_actions(
+                    candidate.suggested_actions,
+                    slot=slot,
+                    dish_name=name,
+                ),
                 reason=candidate.reason.strip() if candidate.reason else None,
             ),
         )
@@ -553,7 +687,7 @@ def _parse_replacement_payload(raw_content: str) -> list[ReplacementCandidate]:
     return candidates
 
 
-def _parse_adjustment_payload(raw_content: str) -> ReplacementCandidate:
+def _parse_adjustment_payload(raw_content: str, *, slot: str) -> ReplacementCandidate:
     try:
         payload = json.loads(raw_content)
     except json.JSONDecodeError as err:
@@ -575,8 +709,30 @@ def _parse_adjustment_payload(raw_content: str) -> ReplacementCandidate:
         name=name,
         summary=summary,
         adaptation_notes=[note.strip() for note in parsed.adaptation_notes if note.strip()],
+        suggested_actions=_parse_quick_actions(
+            parsed.suggested_actions,
+            slot=slot,
+            dish_name=name,
+        ),
         reason=parsed.reason.strip() if parsed.reason else None,
     )
+
+
+def _parse_policy_reason_payload(raw_content: str) -> str | None:
+    try:
+        payload = json.loads(raw_content)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"AI returned invalid JSON for policy reason: {err}") from err
+
+    try:
+        parsed = _PolicyReasonModel.model_validate(payload)
+    except ValidationError as err:
+        raise ValueError(f"AI policy reason payload failed schema validation: {err}") from err
+
+    if parsed.policy_note is None:
+        return None
+    normalized_note = parsed.policy_note.strip()
+    return normalized_note or None
 
 
 def _iter_dates(start_date: date, end_date: date) -> list[date]:
@@ -590,6 +746,106 @@ def _iter_dates(start_date: date, end_date: date) -> list[date]:
 
 def _render_list(values: list[str]) -> str:
     return ", ".join(values) if values else "нет"
+
+
+def _render_household_members(context: WeeklyPlanGenerationContext) -> str:
+    return "\n".join(
+        [
+            (
+                f"- {member.display_name}: ограничения={_render_list(member.constraints)}, "
+                f"любит={_render_list(member.favorite_cuisines)}, "
+                f"заметка={member.profile_note or 'нет'}"
+            )
+            for member in context.members
+        ],
+    )
+
+
+def _render_household_policies(policies: list[HouseholdDishPolicyContext]) -> str:
+    if not policies:
+        return "none"
+    return "\n".join(
+        [
+            f"- {policy.dish_name}: {policy.verdict.value}; note={policy.note or 'нет'}"
+            for policy in policies
+        ],
+    )
+
+
+def _parse_quick_actions(
+    raw_actions: list[_QuickActionModel],
+    *,
+    slot: str,
+    dish_name: str,
+) -> list[DishQuickAction]:
+    parsed_actions: list[DishQuickAction] = []
+    seen_labels: set[str] = set()
+    for action in raw_actions:
+        label = action.label.strip()
+        instruction = action.instruction.strip()
+        if not label or not instruction:
+            continue
+        normalized_label = label.casefold()
+        if normalized_label in seen_labels:
+            continue
+        seen_labels.add(normalized_label)
+        parsed_actions.append(
+            DishQuickAction(
+                label=label[:24],
+                instruction=instruction,
+            ),
+        )
+
+    if len(parsed_actions) >= 2:
+        return parsed_actions[:2]
+    return _fallback_quick_actions(slot=slot, dish_name=dish_name)
+
+
+def _fallback_quick_actions(*, slot: str, dish_name: str) -> list[DishQuickAction]:
+    normalized_name = dish_name.casefold()
+    if slot == "dessert":
+        return [
+            DishQuickAction(
+                label="Менее сладким",
+                instruction="Сделай десерт менее сладким, сохранив его общий характер.",
+            ),
+            DishQuickAction(
+                label="Легче",
+                instruction="Сделай десерт легче и менее тяжелым по ощущениям.",
+            ),
+        ]
+    if slot == "breakfast":
+        return [
+            DishQuickAction(
+                label="Сытнее",
+                instruction="Сделай блюдо чуть более сытным для завтрака.",
+            ),
+            DishQuickAction(
+                label="Легче",
+                instruction="Сделай блюдо легче и мягче для утра.",
+            ),
+        ]
+    if "суп" in normalized_name:
+        return [
+            DishQuickAction(
+                label="Погуще",
+                instruction="Сделай суп чуть гуще и насыщеннее.",
+            ),
+            DishQuickAction(
+                label="Легче",
+                instruction="Сделай суп легче и менее жирным.",
+            ),
+        ]
+    return [
+        DishQuickAction(
+            label="Легче",
+            instruction="Сделай блюдо легче и менее жирным, сохранив его основную идею.",
+        ),
+        DishQuickAction(
+            label="Мягче вкус",
+            instruction="Сделай вкус блюда мягче и менее резким, сохранив его идею.",
+        ),
+    ]
 
 
 def _render_pantry(context: WeeklyPlanGenerationContext) -> str:

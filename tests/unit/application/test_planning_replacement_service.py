@@ -13,6 +13,7 @@ from aimealplanner.application.planning.dto import (
     StoredPlanningUser,
 )
 from aimealplanner.application.planning.generation_dto import (
+    DishQuickAction,
     PlanningMemberContext,
     RecipeHint,
     RecipeHintIngredient,
@@ -28,7 +29,7 @@ from aimealplanner.application.planning.repositories import (
     PlanningRepositoryBundleFactory,
     WeeklyPlanRepository,
 )
-from aimealplanner.infrastructure.db.enums import RepeatabilityMode
+from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict, RepeatabilityMode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -82,6 +83,8 @@ class FakeWeeklyPlanRepository:
         default_factory=dict,
     )
     applied_replacements: list[PlannedMealItemReplacement] = field(default_factory=list)
+    dish_ids_by_item_id: dict[UUID, UUID] = field(default_factory=dict)
+    policies_by_dish_id: dict[UUID, DishFeedbackVerdict] = field(default_factory=dict)
 
     async def get_latest_draft_for_household(self, household_id: UUID) -> None:
         _ = household_id
@@ -118,13 +121,71 @@ class FakeWeeklyPlanRepository:
             weekly_plan_id=existing_item.weekly_plan_id,
             planned_meal_id=existing_item.planned_meal_id,
             planned_meal_item_id=existing_item.planned_meal_item_id,
+            dish_id=None if replacement.clear_dish_link else existing_item.dish_id,
             meal_date=existing_item.meal_date,
             slot=existing_item.slot,
             name=replacement.name,
             summary=replacement.summary,
             adaptation_notes=replacement.adaptation_notes,
             snapshot_payload=replacement.snapshot_payload,
+            suggested_actions=_extract_test_quick_actions(replacement.snapshot_payload),
+            household_policy_verdict=None,
+            household_policy_note=None,
         )
+
+    async def ensure_item_dish(
+        self,
+        household_id: UUID,
+        planned_meal_item_id: UUID,
+    ) -> UUID:
+        _ = household_id
+        dish_id = self.dish_ids_by_item_id.setdefault(planned_meal_item_id, uuid4())
+        item = self.item_views_by_id[planned_meal_item_id]
+        self.item_views_by_id[planned_meal_item_id] = StoredPlanItemView(
+            weekly_plan_id=item.weekly_plan_id,
+            planned_meal_id=item.planned_meal_id,
+            planned_meal_item_id=item.planned_meal_item_id,
+            dish_id=dish_id,
+            meal_date=item.meal_date,
+            slot=item.slot,
+            name=item.name,
+            summary=item.summary,
+            adaptation_notes=item.adaptation_notes,
+            snapshot_payload=item.snapshot_payload,
+            suggested_actions=item.suggested_actions,
+            household_policy_verdict=self.policies_by_dish_id.get(dish_id),
+            household_policy_note=None,
+        )
+        return dish_id
+
+    async def upsert_household_dish_policy(
+        self,
+        household_id: UUID,
+        dish_id: UUID,
+        verdict: DishFeedbackVerdict,
+        note: str | None,
+    ) -> None:
+        _ = (household_id, note)
+        self.policies_by_dish_id[dish_id] = verdict
+        for item_id, current_dish_id in list(self.dish_ids_by_item_id.items()):
+            if current_dish_id != dish_id:
+                continue
+            item = self.item_views_by_id[item_id]
+            self.item_views_by_id[item_id] = StoredPlanItemView(
+                weekly_plan_id=item.weekly_plan_id,
+                planned_meal_id=item.planned_meal_id,
+                planned_meal_item_id=item.planned_meal_item_id,
+                dish_id=item.dish_id,
+                meal_date=item.meal_date,
+                slot=item.slot,
+                name=item.name,
+                summary=item.summary,
+                adaptation_notes=item.adaptation_notes,
+                snapshot_payload=item.snapshot_payload,
+                suggested_actions=item.suggested_actions,
+                household_policy_verdict=verdict,
+                household_policy_note=note,
+            )
 
     async def get_generation_context(
         self,
@@ -269,12 +330,25 @@ def _build_item_view(weekly_plan_id: UUID, planned_meal_item_id: UUID) -> Stored
         weekly_plan_id=weekly_plan_id,
         planned_meal_id=uuid4(),
         planned_meal_item_id=planned_meal_item_id,
+        dish_id=None,
         meal_date=date(2026, 3, 23),
         slot="dinner",
         name="Паста с курицей",
         summary="Сливочная паста на ужин",
         adaptation_notes=["меньше чеснока"],
         snapshot_payload={"summary": "Сливочная паста на ужин"},
+        suggested_actions=[
+            DishQuickAction(
+                label="Легче",
+                instruction="Сделай блюдо легче.",
+            ),
+            DishQuickAction(
+                label="Мягче вкус",
+                instruction="Сделай вкус мягче.",
+            ),
+        ],
+        household_policy_verdict=None,
+        household_policy_note=None,
     )
 
 
@@ -341,18 +415,21 @@ async def test_suggest_replacements_uses_recipe_hints_when_available() -> None:
                 name="Запеченная рыба с картофелем",
                 summary="Спокойный ужин без лишней тяжести",
                 adaptation_notes=["без оливок"],
+                suggested_actions=[],
                 reason="Лучше подходит под семейные ограничения",
             ),
             ReplacementCandidate(
                 name="Индейка с булгуром",
                 summary="Сытный, но более легкий семейный ужин",
                 adaptation_notes=["без оливок"],
+                suggested_actions=[],
                 reason="Удобно готовить на несколько порций",
             ),
             ReplacementCandidate(
                 name="Курица с запеченными овощами",
                 summary="Привычный будничный вариант без лишней сложности",
                 adaptation_notes=["без оливок"],
+                suggested_actions=[],
                 reason="Сохраняет формат простого домашнего ужина",
             ),
         ],
@@ -409,6 +486,7 @@ async def test_apply_replacement_updates_item_snapshot_and_commits() -> None:
     assert world.weekly_plan_repository.applied_replacements[0].name == "Индейка с булгуром"
     assert result.updated_item.name == "Индейка с булгуром"
     assert result.updated_item.adaptation_notes == ["без оливок", "меньше масла"]
+    assert result.updated_item.dish_id is None
 
 
 @pytest.mark.asyncio
@@ -425,6 +503,7 @@ async def test_apply_adjustment_updates_item_in_place_and_keeps_instruction() ->
             name="Паста с курицей",
             summary="Менее острая и более мягкая версия ужина",
             adaptation_notes=["меньше острого перца"],
+            suggested_actions=[],
             reason="Убрал остроту и сделал вкус мягче",
         ),
     )
@@ -445,6 +524,24 @@ async def test_apply_adjustment_updates_item_in_place_and_keeps_instruction() ->
     assert suggestion_client.observed_adjustment_instruction == "Сделай блюдо менее острым."
     assert result.updated_item.summary == "Менее острая и более мягкая версия ужина"
     assert result.updated_item.adaptation_notes == ["меньше острого перца"]
+    assert result.updated_item.dish_id is None
     assert result.updated_item.snapshot_payload["adjustment_instruction"] == (
         "Сделай блюдо менее острым."
     )
+
+
+def _extract_test_quick_actions(snapshot_payload: dict[str, object]) -> list[DishQuickAction]:
+    payload = snapshot_payload.get("suggested_actions")
+    if not isinstance(payload, list):
+        return []
+    actions: list[DishQuickAction] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        item_payload = cast(dict[str, object], item)
+        label = item_payload.get("label")
+        instruction = item_payload.get("instruction")
+        if not isinstance(label, str) or not isinstance(instruction, str):
+            continue
+        actions.append(DishQuickAction(label=label, instruction=instruction))
+    return actions
