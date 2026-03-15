@@ -9,6 +9,7 @@ def clear_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "BOT_TOKEN",
         "DATABASE_URL",
         "REDIS_URL",
+        "SENTRY_DSN",
         "AI_API_KEY",
         "AI_MODEL",
         "AI_BASE_URL",
@@ -35,6 +36,7 @@ def test_settings_load_defaults_from_env(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.log_level == "INFO"
     assert settings.database_url.startswith("postgresql+asyncpg://")
     assert settings.redis_url.startswith("redis://")
+    assert settings.sentry_dsn is None
     assert settings.ai_model == "chatgpt/gpt-5.2"
     assert settings.ai_base_url == "https://example.test/v1"
     assert settings.spoonacular_api_key is None

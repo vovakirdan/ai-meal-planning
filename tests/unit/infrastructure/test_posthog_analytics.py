@@ -32,6 +32,7 @@ def _build_settings(*, posthog_api_key: str | None) -> Settings:
         bot_token="123456:realistic-token",
         database_url="postgresql+asyncpg://user:pass@localhost:5432/db",
         redis_url="redis://localhost:6379/0",
+        sentry_dsn=None,
         ai_api_key="test-ai-key",
         ai_model="chatgpt/gpt-5.2",
         ai_base_url="https://example.test/v1",

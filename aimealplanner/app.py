@@ -24,9 +24,11 @@ from aimealplanner.infrastructure.db.repositories import (
     build_reminder_repository,
 )
 from aimealplanner.infrastructure.db.session import build_engine, build_session_factory
+from aimealplanner.infrastructure.monitoring import SentryMonitor, build_sentry_monitor
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
 from aimealplanner.infrastructure.redis.client import build_redis, verify_redis
 from aimealplanner.presentation.telegram.commands import build_public_bot_commands
+from aimealplanner.presentation.telegram.middlewares import SentryContextMiddleware
 from aimealplanner.presentation.telegram.router import build_router
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ class AppRuntime:
     redis: Redis
     weekly_plan_generator: OpenAIWeeklyPlanGenerator
     recipe_hint_provider: SpoonacularRecipeHintProvider | None
+    sentry: SentryMonitor
     analytics: AnalyticsTracker
     reminder_scheduler: ReminderScheduler
 
@@ -49,6 +52,7 @@ class AppRuntime:
 def build_runtime(settings: Settings | None = None) -> AppRuntime:
     resolved_settings = settings or Settings.from_env()
     configure_logging(resolved_settings.log_level)
+    sentry = build_sentry_monitor(resolved_settings)
 
     engine = build_engine(resolved_settings.database_url)
     session_factory = build_session_factory(engine)
@@ -58,6 +62,7 @@ def build_runtime(settings: Settings | None = None) -> AppRuntime:
     analytics = build_analytics_tracker(resolved_settings)
     bot = Bot(token=resolved_settings.bot_token)
     dispatcher = Dispatcher(storage=RedisStorage(redis=redis))
+    dispatcher.update.outer_middleware(SentryContextMiddleware())
     dispatcher.include_router(
         build_router(
             session_factory,
@@ -95,6 +100,7 @@ def build_runtime(settings: Settings | None = None) -> AppRuntime:
         redis=redis,
         weekly_plan_generator=weekly_plan_generator,
         recipe_hint_provider=recipe_hint_provider,
+        sentry=sentry,
         analytics=analytics,
         reminder_scheduler=reminder_scheduler,
     )
@@ -119,6 +125,7 @@ async def run() -> None:
         await runtime.redis.aclose()
         if runtime.recipe_hint_provider is not None:
             await runtime.recipe_hint_provider.close()
+        await runtime.sentry.aclose()
         await runtime.analytics.aclose()
         await runtime.weekly_plan_generator.close()
         await runtime.engine.dispose()

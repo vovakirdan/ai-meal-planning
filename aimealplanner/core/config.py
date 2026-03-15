@@ -22,6 +22,7 @@ class Settings:
     bot_token: str
     database_url: str
     redis_url: str
+    sentry_dsn: str | None
     ai_api_key: str
     ai_model: str
     ai_base_url: str
@@ -43,6 +44,7 @@ class Settings:
         if "REPLACE_ME" in bot_token or "TEST_TOKEN" in bot_token:
             raise ValueError("BOT_TOKEN must contain a real Telegram bot token")
 
+        sentry_dsn = os.getenv("SENTRY_DSN", "").strip() or None
         ai_api_key = os.getenv("AI_API_KEY", "").strip()
         if not ai_api_key:
             raise ValueError("AI_API_KEY is required")
@@ -74,6 +76,7 @@ class Settings:
             bot_token=bot_token,
             database_url=os.getenv("DATABASE_URL", _DEFAULT_DATABASE_URL),
             redis_url=os.getenv("REDIS_URL", _DEFAULT_REDIS_URL),
+            sentry_dsn=sentry_dsn,
             ai_api_key=ai_api_key,
             ai_model=ai_model,
             ai_base_url=ai_base_url,
