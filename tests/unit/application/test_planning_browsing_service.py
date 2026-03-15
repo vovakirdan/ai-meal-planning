@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -10,6 +11,7 @@ from aimealplanner.application.planning.browsing_dto import (
     StoredPlanDaySummary,
     StoredPlanDayView,
     StoredPlanItemView,
+    StoredPlanMealSummary,
     StoredPlanMealView,
     StoredPlanOverview,
 )
@@ -205,8 +207,36 @@ async def test_get_latest_draft_overview_renders_days_message() -> None:
         start_date=date(2026, 3, 23),
         end_date=date(2026, 3, 29),
         days=[
-            StoredPlanDaySummary(meal_date=date(2026, 3, 23), meals_count=4),
-            StoredPlanDaySummary(meal_date=date(2026, 3, 24), meals_count=4),
+            StoredPlanDaySummary(
+                meal_date=date(2026, 3, 23),
+                meals_count=2,
+                meals=[
+                    StoredPlanMealSummary(
+                        planned_meal_id=uuid4(),
+                        slot="breakfast",
+                        note=None,
+                        item_names=["Овсянка"],
+                    ),
+                    StoredPlanMealSummary(
+                        planned_meal_id=uuid4(),
+                        slot="dinner",
+                        note=None,
+                        item_names=["Паста с курицей"],
+                    ),
+                ],
+            ),
+            StoredPlanDaySummary(
+                meal_date=date(2026, 3, 24),
+                meals_count=1,
+                meals=[
+                    StoredPlanMealSummary(
+                        planned_meal_id=uuid4(),
+                        slot="dinner",
+                        note=None,
+                        item_names=["Рыба с картофелем"],
+                    ),
+                ],
+            ),
         ],
     )
     service = _build_service(user_repository, household_repository, weekly_plan_repository)
@@ -216,6 +246,8 @@ async def test_get_latest_draft_overview_renders_days_message() -> None:
     assert overview.weekly_plan_id == weekly_plan_id
     assert "Текущий план недели." in overview.text
     assert "23.03.2026 (понедельник)" in overview.text
+    assert "Завтрак: Овсянка" in overview.text
+    assert "Ужин: Паста с курицей" in overview.text
     assert "Выбери день" in overview.text
 
 

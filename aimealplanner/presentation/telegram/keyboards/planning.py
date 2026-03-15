@@ -28,6 +28,8 @@ _PLAN_MEAL_PREFIX = "pm"
 _PLAN_ITEM_PREFIX = "pi"
 _PLAN_REPLACE_PREFIX = "pr"
 _PLAN_REPLACE_CHOOSE_PREFIX = "pc"
+_PLAN_ADJUST_PREFIX = "pa"
+_PLAN_CUSTOM_EDIT_PREFIX = "pe"
 
 
 def build_range_choice_keyboard() -> ReplyKeyboardMarkup:
@@ -144,6 +146,22 @@ def build_plan_item_keyboard(
             ],
             [
                 InlineKeyboardButton(
+                    text="Сделать легче",
+                    callback_data=build_plan_adjust_callback(planned_meal_item_id, "lighter"),
+                ),
+                InlineKeyboardButton(
+                    text="Менее острым",
+                    callback_data=build_plan_adjust_callback(planned_meal_item_id, "less_spicy"),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Своя правка",
+                    callback_data=build_plan_custom_edit_callback(planned_meal_item_id),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     text="Назад к блюдам приема пищи",
                     callback_data=build_plan_meal_callback(planned_meal_id),
                 ),
@@ -231,6 +249,14 @@ def build_plan_replace_choose_callback(planned_meal_item_id: UUID, index: int) -
     return f"{_PLAN_REPLACE_CHOOSE_PREFIX}:{planned_meal_item_id.hex}:{index}"
 
 
+def build_plan_adjust_callback(planned_meal_item_id: UUID, action: str) -> str:
+    return f"{_PLAN_ADJUST_PREFIX}:{planned_meal_item_id.hex}:{action}"
+
+
+def build_plan_custom_edit_callback(planned_meal_item_id: UUID) -> str:
+    return f"{_PLAN_CUSTOM_EDIT_PREFIX}:{planned_meal_item_id.hex}"
+
+
 def parse_plan_week_callback(value: str) -> UUID | None:
     return _parse_uuid_callback(value, prefix=_PLAN_WEEK_PREFIX, expected_parts=2)
 
@@ -277,6 +303,23 @@ def parse_plan_replace_choose_callback(value: str) -> tuple[UUID, int] | None:
     except ValueError:
         return None
     return (planned_meal_item_id, index)
+
+
+def parse_plan_adjust_callback(value: str) -> tuple[UUID, str] | None:
+    parts = value.split(":")
+    if len(parts) != 3 or parts[0] != _PLAN_ADJUST_PREFIX:
+        return None
+    planned_meal_item_id = _parse_uuid_hex(parts[1])
+    if planned_meal_item_id is None:
+        return None
+    action = parts[2].strip()
+    if not action:
+        return None
+    return (planned_meal_item_id, action)
+
+
+def parse_plan_custom_edit_callback(value: str) -> UUID | None:
+    return _parse_uuid_callback(value, prefix=_PLAN_CUSTOM_EDIT_PREFIX, expected_parts=2)
 
 
 def _parse_uuid_callback(value: str, *, prefix: str, expected_parts: int) -> UUID | None:

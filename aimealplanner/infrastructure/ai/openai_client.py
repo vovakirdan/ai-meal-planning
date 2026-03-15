@@ -124,6 +124,33 @@ class OpenAIWeeklyPlanGenerator:
             )
             return _parse_replacement_payload(repaired_content)
 
+    async def adjust_item(
+        self,
+        *,
+        item_view: StoredPlanItemView,
+        generation_context: WeeklyPlanGenerationContext,
+        instruction: str,
+        reference_recipes: list[RecipeHint],
+    ) -> ReplacementCandidate:
+        raw_content = await self._request_json(
+            system_prompt=_ADJUSTMENT_SYSTEM_PROMPT,
+            user_prompt=_build_adjustment_prompt(
+                item_view=item_view,
+                generation_context=generation_context,
+                instruction=instruction,
+                reference_recipes=reference_recipes,
+            ),
+        )
+        try:
+            return _parse_adjustment_payload(raw_content)
+        except ValueError as err:
+            logger.warning("adjustment payload validation failed, attempting repair: %s", err)
+            repaired_content = await self._request_json(
+                system_prompt=_ADJUSTMENT_SYSTEM_PROMPT,
+                user_prompt=_build_replacement_repair_prompt(raw_content, str(err)),
+            )
+            return _parse_adjustment_payload(repaired_content)
+
     async def _request_json(
         self,
         *,
@@ -163,6 +190,15 @@ Return valid JSON only.
 Do not use markdown fences.
 Do not add commentary outside the JSON object.
 Keep replacement names, summaries, and adaptation notes in Russian.
+""".strip()
+
+
+_ADJUSTMENT_SYSTEM_PROMPT = """
+You help a Telegram meal planner bot adjust one dish inside a weekly draft.
+Return valid JSON only.
+Do not use markdown fences.
+Do not add commentary outside the JSON object.
+Keep the adjusted dish name, summary, and adaptation notes in Russian.
 """.strip()
 
 
@@ -340,6 +376,66 @@ Required JSON shape:
 """.strip()
 
 
+def _build_adjustment_prompt(
+    *,
+    item_view: StoredPlanItemView,
+    generation_context: WeeklyPlanGenerationContext,
+    instruction: str,
+    reference_recipes: list[RecipeHint],
+) -> str:
+    references_text = _render_replacement_reference_recipes(reference_recipes)
+    household_lines = "\n".join(
+        [
+            (
+                f"- {member.display_name}: ограничения={_render_list(member.constraints)}, "
+                f"любит={_render_list(member.favorite_cuisines)}, "
+                f"заметка={member.profile_note or 'нет'}"
+            )
+            for member in generation_context.members
+        ],
+    )
+    return f"""
+Adjust one dish inside a household weekly plan.
+
+Current dish:
+- name: {item_view.name}
+- summary: {item_view.summary or "нет"}
+- slot: {item_view.slot}
+- meal_date: {item_view.meal_date.isoformat()}
+- adaptation_notes: {_render_list(item_view.adaptation_notes)}
+
+Adjustment request:
+- instruction: {instruction}
+
+Week context:
+- week_mood: {generation_context.week_mood or "без явного уклона"}
+- weekly_notes: {generation_context.weekly_notes or "нет"}
+- repeatability_mode: {generation_context.repeatability_mode.value}
+
+Household:
+{household_lines}
+
+Optional recipe references:
+{references_text}
+
+Requirements:
+- Keep the dish suitable for the same meal slot.
+- Preserve the core idea of the dish unless the instruction clearly asks for a stronger change.
+- Avoid forbidden ingredients.
+- Prefer practical household cooking over restaurant-style complexity.
+- reason should briefly explain what changed.
+- adaptation_notes should be an empty list if there are no special adjustments.
+
+Required JSON shape:
+{{
+  "name": "string",
+  "summary": "string",
+  "adaptation_notes": ["string"],
+  "reason": "string or null"
+}}
+""".strip()
+
+
 def _parse_week_plan_payload(
     context: WeeklyPlanGenerationContext,
     raw_content: str,
@@ -455,6 +551,32 @@ def _parse_replacement_payload(raw_content: str) -> list[ReplacementCandidate]:
     if len(candidates) != 3:
         raise ValueError("AI must return exactly 3 replacement candidates")
     return candidates
+
+
+def _parse_adjustment_payload(raw_content: str) -> ReplacementCandidate:
+    try:
+        payload = json.loads(raw_content)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"AI returned invalid JSON for adjustment: {err}") from err
+
+    try:
+        parsed = _ReplacementCandidateModel.model_validate(payload)
+    except ValidationError as err:
+        raise ValueError(f"AI adjustment payload failed schema validation: {err}") from err
+
+    name = parsed.name.strip()
+    summary = parsed.summary.strip()
+    if not name:
+        raise ValueError("Adjusted dish has empty name")
+    if not summary:
+        raise ValueError("Adjusted dish has empty summary")
+
+    return ReplacementCandidate(
+        name=name,
+        summary=summary,
+        adaptation_notes=[note.strip() for note in parsed.adaptation_notes if note.strip()],
+        reason=parsed.reason.strip() if parsed.reason else None,
+    )
 
 
 def _iter_dates(start_date: date, end_date: date) -> list[date]:

@@ -152,9 +152,19 @@ def render_plan_overview(overview: StoredPlanOverview) -> str:
     lines.append("")
     lines.append("План на неделю:")
     for day in overview.days:
-        lines.append(
-            f"• {day.meal_date.strftime('%d.%m.%Y')} ({_weekday_name(day.meal_date)})",
+        lines.extend(
+            [
+                "",
+                f"• {day.meal_date.strftime('%d.%m.%Y')} ({_weekday_name(day.meal_date)})",
+            ],
         )
+        if not day.meals:
+            lines.append("  Пока без блюд.")
+            continue
+
+        for meal in day.meals:
+            item_names = ", ".join(meal.item_names) if meal.item_names else "Пока без блюд"
+            lines.append(f"  {_render_slot_name(meal.slot)}: {item_names}")
     lines.append("")
     lines.append("Выбери день, чтобы посмотреть блюда подробнее.")
     return "\n".join(lines)
@@ -171,3 +181,15 @@ def _weekday_name(value: date) -> str:
         "воскресенье",
     ]
     return weekdays[value.weekday()]
+
+
+def _render_slot_name(slot: str) -> str:
+    slot_labels = {
+        "breakfast": "Завтрак",
+        "lunch": "Обед",
+        "dinner": "Ужин",
+        "snack_1": "Перекус 1",
+        "snack_2": "Перекус 2",
+        "dessert": "Десерт",
+    }
+    return slot_labels.get(slot, slot)

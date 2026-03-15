@@ -150,8 +150,10 @@ class FakeWeeklyPlanRepository:
 @dataclass
 class FakeSuggestionClient:
     result: list[ReplacementCandidate]
+    adjustment_result: ReplacementCandidate | None = None
     observed_item_name: str | None = None
     observed_reference_titles: list[str] = field(default_factory=list)
+    observed_adjustment_instruction: str | None = None
 
     async def suggest_replacements(
         self,
@@ -164,6 +166,22 @@ class FakeSuggestionClient:
         self.observed_item_name = item_view.name
         self.observed_reference_titles = [recipe.title for recipe in reference_recipes]
         return self.result
+
+    async def adjust_item(
+        self,
+        *,
+        item_view: StoredPlanItemView,
+        generation_context: WeeklyPlanGenerationContext,
+        instruction: str,
+        reference_recipes: list[RecipeHint],
+    ) -> ReplacementCandidate:
+        _ = generation_context
+        self.observed_item_name = item_view.name
+        self.observed_reference_titles = [recipe.title for recipe in reference_recipes]
+        self.observed_adjustment_instruction = instruction
+        if self.adjustment_result is None:
+            raise AssertionError("adjustment_result must be configured for this test")
+        return self.adjustment_result
 
 
 @dataclass
@@ -391,3 +409,42 @@ async def test_apply_replacement_updates_item_snapshot_and_commits() -> None:
     assert world.weekly_plan_repository.applied_replacements[0].name == "Индейка с булгуром"
     assert result.updated_item.name == "Индейка с булгуром"
     assert result.updated_item.adaptation_notes == ["без оливок", "меньше масла"]
+
+
+@pytest.mark.asyncio
+async def test_apply_adjustment_updates_item_in_place_and_keeps_instruction() -> None:
+    world = FakePlanningWorld()
+    user, household = _build_user_and_household()
+    weekly_plan_id = uuid4()
+    planned_meal_item_id = uuid4()
+    item_view = _build_item_view(weekly_plan_id, planned_meal_item_id)
+    generation_context = _build_generation_context(weekly_plan_id, household.id)
+    suggestion_client = FakeSuggestionClient(
+        result=[],
+        adjustment_result=ReplacementCandidate(
+            name="Паста с курицей",
+            summary="Менее острая и более мягкая версия ужина",
+            adaptation_notes=["меньше острого перца"],
+            reason="Убрал остроту и сделал вкус мягче",
+        ),
+    )
+    world.user_repository.users_by_tg_id[user.telegram_user_id] = user
+    world.household_repository.households_by_user_id[user.id] = household
+    world.weekly_plan_repository.item_views_by_id[planned_meal_item_id] = item_view
+    world.weekly_plan_repository.generation_contexts_by_plan_id[weekly_plan_id] = generation_context
+    service = world.build_service(suggestion_client=suggestion_client)
+
+    result = await service.apply_adjustment(
+        user.telegram_user_id,
+        planned_meal_item_id,
+        "Сделай блюдо менее острым.",
+        generation_source="ai_adjustment:custom",
+    )
+
+    assert world.session.commit_count == 1
+    assert suggestion_client.observed_adjustment_instruction == "Сделай блюдо менее острым."
+    assert result.updated_item.summary == "Менее острая и более мягкая версия ужина"
+    assert result.updated_item.adaptation_notes == ["меньше острого перца"]
+    assert result.updated_item.snapshot_payload["adjustment_instruction"] == (
+        "Сделай блюдо менее острым."
+    )

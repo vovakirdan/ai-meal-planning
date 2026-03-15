@@ -168,6 +168,18 @@ class SqlAlchemyWeeklyPlanRepository:
                 StoredPlanDaySummary(
                     meal_date=meal_date,
                     meals_count=len(day_meals),
+                    meals=[
+                        StoredPlanMealSummary(
+                            planned_meal_id=meal.id,
+                            slot=meal.slot.value,
+                            note=meal.note,
+                            item_names=[
+                                item.snapshot_name
+                                for item in sorted(meal.items, key=lambda item: item.position)
+                            ],
+                        )
+                        for meal in sorted(day_meals, key=_sort_meal_record)
+                    ],
                 )
                 for meal_date, day_meals in sorted(meals_by_day.items())
             ],

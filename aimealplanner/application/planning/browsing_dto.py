@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 from uuid import UUID
@@ -10,6 +10,7 @@ from uuid import UUID
 class StoredPlanDaySummary:
     meal_date: date
     meals_count: int
+    meals: list[StoredPlanMealSummary] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

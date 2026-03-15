@@ -10,6 +10,7 @@ from aimealplanner.application.planning.generation_dto import (
     WeeklyPlanGenerationContext,
 )
 from aimealplanner.infrastructure.ai.openai_client import (
+    _parse_adjustment_payload,
     _parse_replacement_payload,
     _parse_week_plan_payload,
 )
@@ -164,3 +165,19 @@ def test_parse_replacement_payload_rejects_duplicate_names() -> None:
 
     with pytest.raises(ValueError, match="Duplicate replacement candidate"):
         _parse_replacement_payload(raw_content)
+
+
+def test_parse_adjustment_payload_accepts_single_adjusted_dish() -> None:
+    raw_content = json.dumps(
+        {
+            "name": "Паста с курицей",
+            "summary": "Менее острая и более мягкая версия ужина",
+            "adaptation_notes": ["меньше острого перца"],
+            "reason": "Убрана лишняя острота",
+        },
+    )
+
+    parsed = _parse_adjustment_payload(raw_content)
+
+    assert parsed.name == "Паста с курицей"
+    assert parsed.adaptation_notes == ["меньше острого перца"]

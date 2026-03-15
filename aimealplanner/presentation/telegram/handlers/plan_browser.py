@@ -28,13 +28,15 @@ from aimealplanner.application.planning.browsing_dto import (
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
-from aimealplanner.presentation.telegram.keyboards.onboarding import remove_keyboard
+from aimealplanner.presentation.telegram.keyboards.onboarding import CANCEL_LABEL, remove_keyboard
 from aimealplanner.presentation.telegram.keyboards.planning import (
     build_plan_day_keyboard,
     build_plan_days_keyboard,
     build_plan_item_keyboard,
     build_plan_meal_keyboard,
     build_replacement_candidates_keyboard,
+    parse_plan_adjust_callback,
+    parse_plan_custom_edit_callback,
     parse_plan_day_callback,
     parse_plan_item_callback,
     parse_plan_meal_callback,
@@ -42,6 +44,7 @@ from aimealplanner.presentation.telegram.keyboards.planning import (
     parse_plan_replace_choose_callback,
     parse_plan_week_callback,
 )
+from aimealplanner.presentation.telegram.states.plan_browser import PlanBrowserStates
 
 
 def build_plan_browser_router(
@@ -246,6 +249,130 @@ def build_plan_browser_router(
             answer_callback=False,
         )
 
+    @router.callback_query(F.data.startswith("pa:"))
+    async def handle_plan_adjust_callback(callback: CallbackQuery) -> None:
+        callback_data = cast(str, callback.data)
+        parsed_value = parse_plan_adjust_callback(callback_data)
+        if parsed_value is None:
+            await callback.answer("Не получилось изменить блюдо.", show_alert=True)
+            return
+
+        planned_meal_item_id, action = parsed_value
+        instruction = _resolve_quick_adjustment_instruction(action)
+        if instruction is None:
+            await callback.answer("Такое действие пока не поддерживается.", show_alert=True)
+            return
+
+        message = _require_callback_message(callback)
+        await callback.answer("Корректирую блюдо...")
+        async with ChatActionSender.typing(
+            bot=_require_callback_bot(callback),
+            chat_id=message.chat.id,
+        ):
+            try:
+                apply_result = await replacement_service.apply_adjustment(
+                    _require_telegram_user_id_from_callback(callback),
+                    planned_meal_item_id,
+                    instruction,
+                    generation_source=f"ai_adjustment:{action}",
+                )
+            except ValueError as err:
+                await message.answer(str(err))
+                return
+
+        await _edit_callback_message(
+            callback,
+            text=_render_item_view(apply_result.updated_item),
+            reply_markup=build_plan_item_keyboard(
+                apply_result.updated_item.weekly_plan_id,
+                apply_result.updated_item.meal_date,
+                apply_result.updated_item.planned_meal_id,
+                apply_result.updated_item.planned_meal_item_id,
+            ),
+            answer_callback=False,
+        )
+
+    @router.callback_query(F.data.startswith("pe:"))
+    async def handle_plan_custom_edit_callback(
+        callback: CallbackQuery,
+        state: FSMContext,
+    ) -> None:
+        callback_data = cast(str, callback.data)
+        planned_meal_item_id = parse_plan_custom_edit_callback(callback_data)
+        if planned_meal_item_id is None:
+            await callback.answer("Не получилось открыть редактирование.", show_alert=True)
+            return
+
+        message = _require_callback_message(callback)
+        await state.set_state(PlanBrowserStates.custom_item_adjustment)
+        await state.update_data(
+            custom_adjustment_item_id=planned_meal_item_id.hex,
+            custom_adjustment_message_id=message.message_id,
+            custom_adjustment_chat_id=message.chat.id,
+        )
+        await callback.answer()
+        await message.answer(
+            (
+                "Напиши, как изменить это блюдо.\n"
+                "Например: сделать менее острым, добавить больше пармезана,\n"
+                "подобрать вариант без сахара.\n"
+                "Чтобы отменить, отправь /cancel."
+            ),
+            reply_markup=remove_keyboard(),
+        )
+
+    @router.message(PlanBrowserStates.custom_item_adjustment)
+    async def handle_custom_item_adjustment(message: Message, state: FSMContext) -> None:
+        try:
+            instruction = _require_text(message)
+        except ValueError:
+            await message.answer("Напиши правку обычным текстом или отправь /cancel.")
+            return
+        if instruction == "/cancel" or instruction == CANCEL_LABEL:
+            await state.clear()
+            await message.answer(
+                "Ок, оставляю блюдо без изменений.",
+                reply_markup=remove_keyboard(),
+            )
+            return
+
+        state_data = await state.get_data()
+        planned_meal_item_hex = cast(str | None, state_data.get("custom_adjustment_item_id"))
+        if planned_meal_item_hex is None:
+            await state.clear()
+            await message.answer(
+                "Не удалось восстановить контекст редактирования. Открой блюдо заново через /week.",
+                reply_markup=remove_keyboard(),
+            )
+            return
+
+        planned_meal_item_id = UUID(hex=planned_meal_item_hex)
+        async with ChatActionSender.typing(
+            bot=_require_message_bot(message),
+            chat_id=message.chat.id,
+        ):
+            try:
+                apply_result = await replacement_service.apply_adjustment(
+                    _require_telegram_user_id_from_message(message),
+                    planned_meal_item_id,
+                    instruction,
+                    generation_source="ai_adjustment:custom",
+                )
+            except ValueError as err:
+                await message.answer(str(err))
+                return
+
+        await state.clear()
+        await _edit_stored_item_message(
+            message,
+            state_data,
+            apply_result.updated_item,
+        )
+        await message.answer(
+            "Готово, карточку блюда обновил.",
+            reply_markup=remove_keyboard(),
+        )
+
     @router.callback_query(F.data.startswith("pc:"))
     async def handle_plan_replace_choose_callback(
         callback: CallbackQuery,
@@ -385,6 +512,14 @@ def _render_item_view(item_view: StoredPlanItemView) -> str:
     if item_view.summary:
         lines.extend(["", item_view.summary])
 
+    adjustment_instruction = item_view.snapshot_payload.get("adjustment_instruction")
+    if isinstance(adjustment_instruction, str) and adjustment_instruction.strip():
+        lines.extend(["", f"Последняя правка: {adjustment_instruction.strip()}"])
+
+    adjustment_reason = item_view.snapshot_payload.get("adjustment_reason")
+    if isinstance(adjustment_reason, str) and adjustment_reason.strip():
+        lines.append(f"Что изменилось: {adjustment_reason.strip()}")
+
     if item_view.adaptation_notes:
         lines.extend(["", "Адаптации:"])
         lines.extend([f"• {note}" for note in item_view.adaptation_notes])
@@ -450,6 +585,12 @@ def _require_telegram_user_id_from_message(message: Message) -> int:
     return message.from_user.id
 
 
+def _require_text(message: Message) -> str:
+    if message.text is None or not message.text.strip():
+        raise ValueError("Text message is required")
+    return message.text.strip()
+
+
 def _require_telegram_user_id_from_callback(callback: CallbackQuery) -> int:
     if callback.from_user is None:
         raise ValueError("Telegram user context is required")
@@ -462,10 +603,56 @@ def _require_callback_message(callback: CallbackQuery) -> Message:
     return callback.message
 
 
+def _require_message_bot(message: Message) -> Bot:
+    if message.bot is None:
+        raise ValueError("Telegram bot context is required")
+    return message.bot
+
+
 def _require_callback_bot(callback: CallbackQuery) -> Bot:
     if callback.bot is None:
         raise ValueError("Telegram bot context is required")
     return callback.bot
+
+
+def _resolve_quick_adjustment_instruction(action: str) -> str | None:
+    quick_actions = {
+        "lighter": "Сделай блюдо легче и менее жирным, сохранив его основную идею.",
+        "less_spicy": "Сделай блюдо менее острым, сохранив вкус и общую идею блюда.",
+    }
+    return quick_actions.get(action)
+
+
+async def _edit_stored_item_message(
+    message: Message,
+    state_data: dict[str, object],
+    item_view: StoredPlanItemView,
+) -> None:
+    chat_id = cast(int | str | None, state_data.get("custom_adjustment_chat_id"))
+    message_id = cast(int | None, state_data.get("custom_adjustment_message_id"))
+    if chat_id is None or message_id is None:
+        await message.answer(
+            _render_item_view(item_view),
+            reply_markup=build_plan_item_keyboard(
+                item_view.weekly_plan_id,
+                item_view.meal_date,
+                item_view.planned_meal_id,
+                item_view.planned_meal_item_id,
+            ),
+        )
+        return
+
+    await _require_message_bot(message).edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=_render_item_view(item_view),
+        reply_markup=build_plan_item_keyboard(
+            item_view.weekly_plan_id,
+            item_view.meal_date,
+            item_view.planned_meal_id,
+            item_view.planned_meal_item_id,
+        ),
+    )
 
 
 async def _store_replacement_candidates(

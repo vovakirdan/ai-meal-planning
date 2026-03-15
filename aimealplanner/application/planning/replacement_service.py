@@ -33,6 +33,15 @@ class ReplacementSuggestionClient(Protocol):
         reference_recipes: list[RecipeHint],
     ) -> list[ReplacementCandidate]: ...
 
+    async def adjust_item(
+        self,
+        *,
+        item_view: StoredPlanItemView,
+        generation_context: WeeklyPlanGenerationContext,
+        instruction: str,
+        reference_recipes: list[RecipeHint],
+    ) -> ReplacementCandidate: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ReplacementApplyResult:
@@ -112,6 +121,76 @@ class DishReplacementService:
             updated_item = await repositories.weekly_plan_repository.get_item_view(
                 household_id,
                 replacement.planned_meal_item_id,
+            )
+            if updated_item is None:
+                raise ValueError("Не удалось прочитать обновленное блюдо.")
+
+            return ReplacementApplyResult(updated_item=updated_item)
+
+    async def apply_adjustment(
+        self,
+        telegram_user_id: int,
+        planned_meal_item_id: UUID,
+        instruction: str,
+        *,
+        generation_source: str,
+    ) -> ReplacementApplyResult:
+        normalized_instruction = instruction.strip()
+        if not normalized_instruction:
+            raise ValueError("Нужна инструкция, как изменить блюдо.")
+
+        async with self._session_factory() as session:
+            repositories = self._repositories_factory(session)
+            household_id = await _resolve_household_id(repositories, telegram_user_id)
+            existing_item = await repositories.weekly_plan_repository.get_item_view(
+                household_id,
+                planned_meal_item_id,
+            )
+            if existing_item is None:
+                raise ValueError("Не удалось открыть выбранное блюдо.")
+
+            generation_context = await repositories.weekly_plan_repository.get_generation_context(
+                existing_item.weekly_plan_id,
+            )
+            if generation_context is None:
+                raise ValueError("Не удалось восстановить контекст недельного плана.")
+
+            reference_recipes = await _collect_reference_recipes(
+                self._recipe_hint_provider,
+                generation_context,
+                existing_item.name,
+            )
+            adjusted_item = await self._suggestion_client.adjust_item(
+                item_view=existing_item,
+                generation_context=generation_context,
+                instruction=normalized_instruction,
+                reference_recipes=reference_recipes,
+            )
+
+            updated_payload = dict(existing_item.snapshot_payload)
+            updated_payload.update(
+                {
+                    "summary": adjusted_item.summary,
+                    "adjustment_instruction": normalized_instruction,
+                    "adjustment_reason": adjusted_item.reason,
+                    "generation_source": generation_source,
+                },
+            )
+
+            await repositories.weekly_plan_repository.update_item_snapshot(
+                PlannedMealItemReplacement(
+                    planned_meal_item_id=planned_meal_item_id,
+                    name=adjusted_item.name,
+                    summary=adjusted_item.summary,
+                    adaptation_notes=adjusted_item.adaptation_notes,
+                    snapshot_payload=updated_payload,
+                ),
+            )
+            await session.commit()
+
+            updated_item = await repositories.weekly_plan_repository.get_item_view(
+                household_id,
+                planned_meal_item_id,
             )
             if updated_item is None:
                 raise ValueError("Не удалось прочитать обновленное блюдо.")
