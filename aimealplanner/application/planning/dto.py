@@ -5,6 +5,8 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
+from aimealplanner.infrastructure.db.enums import RepeatabilityMode
+
 
 @dataclass(frozen=True, slots=True)
 class StoredPlanningUser:
@@ -20,6 +22,7 @@ class StoredPlanningHousehold:
     onboarding_completed_at: datetime | None
     default_meal_count_per_day: int
     desserts_enabled: bool
+    repeatability_mode: RepeatabilityMode
     pantry_items_count: int
 
 

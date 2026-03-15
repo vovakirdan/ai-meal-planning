@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import date, timedelta
 from typing import cast
+from uuid import UUID
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
+from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aimealplanner.application.planning import (
     PlanDraftInput,
     PlanningService,
     PlanningStartContext,
+    WeeklyPlanGenerationService,
 )
+from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
 from aimealplanner.presentation.telegram.keyboards.onboarding import (
     NO_LABEL,
@@ -30,18 +36,27 @@ from aimealplanner.presentation.telegram.keyboards.planning import (
     TODAY_LABEL,
     TOMORROW_LABEL,
     WEEK_MOOD_LABELS,
+    build_plan_days_keyboard,
     build_range_choice_keyboard,
     build_week_mood_keyboard,
 )
 from aimealplanner.presentation.telegram.planning_parsing import parse_date_input
 from aimealplanner.presentation.telegram.states.planning import PlanningStates
 
+logger = logging.getLogger(__name__)
+
 
 def build_planning_router(
     session_factory: async_sessionmaker[AsyncSession],
+    weekly_plan_generator: OpenAIWeeklyPlanGenerator,
 ) -> Router:
     router = Router(name="planning")
     service = PlanningService(session_factory, build_planning_repositories)
+    generation_service = WeeklyPlanGenerationService(
+        session_factory,
+        build_planning_repositories,
+        weekly_plan_generator,
+    )
 
     @router.message(Command("plan"))
     async def handle_plan_start(message: Message, state: FSMContext) -> None:
@@ -84,7 +99,7 @@ def build_planning_router(
         if not should_replace:
             await state.clear()
             await message.answer(
-                "Ок, оставляю текущий черновик без изменений.",
+                "Ок, оставляю текущий черновик без изменений. Открыть его можно командой /week.",
                 reply_markup=remove_keyboard(),
             )
             return
@@ -279,7 +294,13 @@ def build_planning_router(
                 "Запасы пока пусты, поэтому этот шаг пропускаю.",
                 reply_markup=remove_keyboard(),
             )
-            await _create_plan_draft(message, state, service, pantry_considered=False)
+            await _create_plan_draft(
+                message,
+                state,
+                service,
+                generation_service,
+                pantry_considered=False,
+            )
             return
 
         await state.set_state(PlanningStates.pantry_considered)
@@ -296,7 +317,13 @@ def build_planning_router(
             await message.answer("Пожалуйста, выбери Да или Нет.")
             return
 
-        await _create_plan_draft(message, state, service, pantry_considered=pantry_considered)
+        await _create_plan_draft(
+            message,
+            state,
+            service,
+            generation_service,
+            pantry_considered=pantry_considered,
+        )
 
     return router
 
@@ -336,6 +363,7 @@ async def _create_plan_draft(
     message: Message,
     state: FSMContext,
     service: PlanningService,
+    generation_service: WeeklyPlanGenerationService,
     *,
     pantry_considered: bool,
 ) -> None:
@@ -372,20 +400,24 @@ async def _create_plan_draft(
         return
 
     await state.clear()
-    mood_text = week_mood or "без явного уклона"
-    pantry_text = "да" if draft.pantry_considered else "нет"
     await message.answer(
         (
-            "Черновик недели сохранен.\n"
+            "Принял. Составляю план недели.\n"
             f"Период: {format_date(draft.start_date)} - {format_date(draft.end_date)}.\n"
-            f"Шаблон: {describe_template(meal_count_per_day, desserts_enabled)}.\n"
-            f"Настроение недели: {mood_text}.\n"
-            f"Учитывать запасы: {pantry_text}.\n"
-            "На этом шаге я сохранил weekly context и draft. "
-            "Следом подключим генерацию меню."
+            "Когда закончу, пришлю готовый черновик сообщением."
         ),
         reply_markup=remove_keyboard(),
     )
+    generation_task = asyncio.create_task(
+        _generate_week_plan_and_send(
+            bot=_require_bot(message),
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            generation_service=generation_service,
+            weekly_plan_id=draft.weekly_plan_id,
+        ),
+    )
+    generation_task.add_done_callback(_report_background_task_result)
 
 
 def describe_template(meal_count_per_day: int, desserts_enabled: bool) -> str:
@@ -436,6 +468,12 @@ def _require_telegram_user_id(message: Message) -> int:
     return message.from_user.id
 
 
+def _require_bot(message: Message) -> Bot:
+    if message.bot is None:
+        raise ValueError("Telegram bot context is required")
+    return message.bot
+
+
 def _require_text(message: Message) -> str:
     if message.text is None:
         raise ValueError("Text message is required")
@@ -449,3 +487,56 @@ def _parse_yes_no(value: str) -> bool | None:
     if normalized == NO_LABEL:
         return False
     return None
+
+
+async def _generate_week_plan_and_send(
+    *,
+    bot: Bot,
+    chat_id: int,
+    message_thread_id: int | None,
+    generation_service: WeeklyPlanGenerationService,
+    weekly_plan_id: UUID,
+) -> None:
+    try:
+        async with ChatActionSender.typing(
+            bot=bot,
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+        ):
+            result = await generation_service.generate_for_plan(weekly_plan_id)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=result.rendered_message,
+            message_thread_id=message_thread_id,
+            reply_markup=build_plan_days_keyboard(
+                result.weekly_plan_id,
+                result.start_date,
+                result.end_date,
+            ),
+        )
+        await bot.send_message(
+            chat_id=chat_id,
+            text="Открыть текущий план позже можно командой /week.",
+            message_thread_id=message_thread_id,
+            reply_markup=remove_keyboard(),
+        )
+    except Exception:
+        logger.exception("weekly plan generation failed for draft %s", weekly_plan_id)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "Не удалось собрать план недели с первого раза.\n"
+                "Черновик сохранен, но генерация не завершилась. "
+                "Попробуй еще раз чуть позже."
+            ),
+            message_thread_id=message_thread_id,
+            reply_markup=remove_keyboard(),
+        )
+
+
+def _report_background_task_result(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.exception("weekly plan background task crashed", exc_info=exception)

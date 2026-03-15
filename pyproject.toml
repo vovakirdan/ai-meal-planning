@@ -8,6 +8,7 @@ dependencies = [
     "aiogram>=3.26.0",
     "alembic>=1.18.4",
     "asyncpg>=0.31.0",
+    "openai>=2.28.0",
     "python-dotenv>=1.2.2",
     "redis>=7.3.0",
     "sqlalchemy>=2.0.48",

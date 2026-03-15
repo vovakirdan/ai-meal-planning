@@ -7,16 +7,27 @@ from uuid import UUID, uuid4
 
 import pytest
 from aimealplanner.application.planning import PlanDraftInput, PlanningService
+from aimealplanner.application.planning.browsing_dto import (
+    StoredPlanDayView,
+    StoredPlanItemView,
+    StoredPlanMealView,
+    StoredPlanOverview,
+)
 from aimealplanner.application.planning.dto import (
     PlanDraftResult,
     StoredDraftPlan,
     StoredPlanningHousehold,
     StoredPlanningUser,
 )
+from aimealplanner.application.planning.generation_dto import (
+    GeneratedWeekPlan,
+    WeeklyPlanGenerationContext,
+)
 from aimealplanner.application.planning.repositories import (
     PlanningRepositories,
     PlanningRepositoryBundleFactory,
 )
+from aimealplanner.infrastructure.db.enums import RepeatabilityMode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -81,6 +92,35 @@ class FakeWeeklyPlanRepository:
         self.existing_drafts_by_household_id[household_id] = []
         return deleted_count
 
+    async def get_plan_overview(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+    ) -> StoredPlanOverview | None:
+        raise NotImplementedError
+
+    async def get_day_view(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+        meal_date: date,
+    ) -> StoredPlanDayView | None:
+        raise NotImplementedError
+
+    async def get_meal_view(
+        self,
+        household_id: UUID,
+        planned_meal_id: UUID,
+    ) -> StoredPlanMealView | None:
+        raise NotImplementedError
+
+    async def get_item_view(
+        self,
+        household_id: UUID,
+        planned_meal_item_id: UUID,
+    ) -> StoredPlanItemView | None:
+        raise NotImplementedError
+
     async def create_draft(
         self,
         household_id: UUID,
@@ -96,6 +136,19 @@ class FakeWeeklyPlanRepository:
             active_slots=active_slots,
             pantry_considered=draft.pantry_considered,
         )
+
+    async def get_generation_context(
+        self,
+        weekly_plan_id: UUID,
+    ) -> WeeklyPlanGenerationContext | None:
+        raise NotImplementedError
+
+    async def replace_generated_meals(
+        self,
+        weekly_plan_id: UUID,
+        generated_plan: GeneratedWeekPlan,
+    ) -> None:
+        raise NotImplementedError
 
 
 @dataclass
@@ -144,6 +197,7 @@ def _build_user_and_household() -> tuple[StoredPlanningUser, StoredPlanningHouse
             onboarding_completed_at=datetime(2026, 3, 15, 8, 0, tzinfo=UTC),
             default_meal_count_per_day=3,
             desserts_enabled=False,
+            repeatability_mode=RepeatabilityMode.BALANCED,
             pantry_items_count=2,
         ),
     )
@@ -177,6 +231,7 @@ async def test_start_planning_requires_completed_onboarding() -> None:
         onboarding_completed_at=None,
         default_meal_count_per_day=household.default_meal_count_per_day,
         desserts_enabled=household.desserts_enabled,
+        repeatability_mode=household.repeatability_mode,
         pantry_items_count=household.pantry_items_count,
     )
     world.user_repository.users_by_tg_id[user.telegram_user_id] = user
@@ -282,6 +337,7 @@ async def test_create_plan_draft_rejects_pantry_usage_when_pantry_is_empty() -> 
         onboarding_completed_at=household.onboarding_completed_at,
         default_meal_count_per_day=household.default_meal_count_per_day,
         desserts_enabled=household.desserts_enabled,
+        repeatability_mode=household.repeatability_mode,
         pantry_items_count=0,
     )
     service = world.build_service(now=datetime(2026, 3, 18, 9, 0, tzinfo=UTC))

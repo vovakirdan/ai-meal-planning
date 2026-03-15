@@ -20,6 +20,9 @@ class Settings:
     bot_token: str
     database_url: str
     redis_url: str
+    ai_api_key: str
+    ai_model: str
+    ai_base_url: str
     app_env: AppEnv
     log_level: str
 
@@ -33,6 +36,18 @@ class Settings:
             raise ValueError("BOT_TOKEN is required")
         if "REPLACE_ME" in bot_token or "TEST_TOKEN" in bot_token:
             raise ValueError("BOT_TOKEN must contain a real Telegram bot token")
+
+        ai_api_key = os.getenv("AI_API_KEY", "").strip()
+        if not ai_api_key:
+            raise ValueError("AI_API_KEY is required")
+
+        ai_model = os.getenv("AI_MODEL", "").strip()
+        if not ai_model:
+            raise ValueError("AI_MODEL is required")
+
+        ai_base_url = os.getenv("AI_BASE_URL", "").strip()
+        if not ai_base_url:
+            raise ValueError("AI_BASE_URL is required")
 
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
         if log_level not in _ALLOWED_LOG_LEVELS:
@@ -50,6 +65,9 @@ class Settings:
             bot_token=bot_token,
             database_url=os.getenv("DATABASE_URL", _DEFAULT_DATABASE_URL),
             redis_url=os.getenv("REDIS_URL", _DEFAULT_REDIS_URL),
+            ai_api_key=ai_api_key,
+            ai_model=ai_model,
+            ai_base_url=ai_base_url,
             app_env=cast(AppEnv, app_env),
             log_level=log_level,
         )
