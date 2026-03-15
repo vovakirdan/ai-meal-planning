@@ -58,7 +58,8 @@ REDIS_URL=redis://redis:6379/0
 
 AI_API_KEY=...
 AI_MODEL=chatgpt/gpt-5.3-codex-spark
-AI_BASE_URL=http://host.docker.internal:4001/v1
+AI_BASE_URL=http://litellm:4000/v1
+AI_DOCKER_NETWORK=zov_default
 
 SPOONACULAR_API_KEY=...
 
@@ -69,10 +70,11 @@ POSTHOG_HOST=https://eu.posthog.com
 ```
 
 Примечание по `AI_BASE_URL`:
-- на сервере endpoint на `127.0.0.1:4001` отвечает;
-- контейнер бота не видит host loopback напрямую;
-- поэтому в `compose.prod.yaml` уже добавлен `host.docker.internal:host-gateway`;
-- внутри контейнера нужно использовать именно `http://host.docker.internal:4001/v1`.
+- локальный AI proxy `litellm` на сервере опубликован на host loopback и недоступен из чужого контейнера через `127.0.0.1`;
+- поэтому bot container должен быть подключен к общей Docker network с `litellm`;
+- в `compose.prod.yaml` bot подключается к внешней сети `${AI_DOCKER_NETWORK}`;
+- внутри контейнера нужно использовать именно `http://litellm:4000/v1`;
+- на текущем сервере значение `AI_DOCKER_NETWORK` равно `zov_default`.
 
 ## One-Time Server Requirements
 

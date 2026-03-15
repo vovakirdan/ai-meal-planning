@@ -43,8 +43,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - ai_upstream
     restart: unless-stopped
     logging:
       driver: json-file
@@ -54,3 +55,8 @@ services:
 
 volumes:
   postgres_data:
+
+networks:
+  ai_upstream:
+    external: true
+    name: ${AI_DOCKER_NETWORK:?AI_DOCKER_NETWORK is required}
