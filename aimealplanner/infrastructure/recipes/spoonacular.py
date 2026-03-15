@@ -21,6 +21,7 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _NON_WORD_RE = re.compile(r"^[^\w]+|[^\w]+$")
 _MOOD_TO_CUISINE = {
     "Азиатская": "Asian",
+    "Грузинская": "Eastern European",
     "Мексиканская": "Mexican",
     "Русская": "Eastern European",
     "Средиземноморская": "Mediterranean",
@@ -32,6 +33,7 @@ _MOOD_TO_DIET = {
 }
 _FAVORITE_CUISINE_MAP = {
     "азиатская": "Asian",
+    "грузинская": "Eastern European",
     "мексиканская": "Mexican",
     "русская": "Eastern European",
     "средиземноморская": "Mediterranean",

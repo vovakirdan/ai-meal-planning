@@ -10,5 +10,6 @@ class PlanningStates(StatesGroup):
     meal_count = State()
     desserts_enabled = State()
     week_mood = State()
+    custom_week_mood = State()
     weekly_notes = State()
     pantry_considered = State()

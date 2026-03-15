@@ -14,13 +14,13 @@ TODAY_LABEL = "С сегодня"
 TOMORROW_LABEL = "С завтра"
 CUSTOM_DATES_LABEL = "Свои даты"
 REJECT_DISH_REASON_LABEL = "Причина в блюде"
+CUSTOM_WEEK_MOOD_LABEL = "Свой вариант"
 
 WEEK_MOOD_LABELS = {
     "Азиатская": "Азиатская",
+    "Грузинская": "Грузинская",
     "Мексиканская": "Мексиканская",
     "Русская": "Русская",
-    "Постное меню": "Постное меню",
-    "Средиземноморская": "Средиземноморская",
 }
 
 _PLAN_WEEK_PREFIX = "pw"
@@ -52,9 +52,9 @@ def build_range_choice_keyboard() -> ReplyKeyboardMarkup:
 def build_week_mood_keyboard() -> ReplyKeyboardMarkup:
     return _keyboard(
         [
-            ["Азиатская", "Мексиканская"],
-            ["Русская", "Постное меню"],
-            ["Средиземноморская"],
+            ["Азиатская", "Грузинская"],
+            ["Русская", "Мексиканская"],
+            [CUSTOM_WEEK_MOOD_LABEL],
             [SKIP_LABEL],
         ],
     )

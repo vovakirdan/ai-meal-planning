@@ -26,7 +26,7 @@ def _build_generation_context() -> WeeklyPlanGenerationContext:
         desserts_enabled=False,
         repeatability_mode=RepeatabilityMode.BALANCED,
         active_slots=["breakfast", "lunch", "dinner"],
-        week_mood="Средиземноморская",
+        week_mood="Грузинская",
         weekly_notes=None,
         pantry_considered=False,
         context_payload={"source": "test"},
@@ -34,7 +34,7 @@ def _build_generation_context() -> WeeklyPlanGenerationContext:
             PlanningMemberContext(
                 display_name="Вова",
                 constraints=["без оливок"],
-                favorite_cuisines=["Средиземноморская"],
+                favorite_cuisines=["Грузинская"],
                 profile_note=None,
             ),
         ],
@@ -46,7 +46,7 @@ def _build_generation_context() -> WeeklyPlanGenerationContext:
 async def test_collect_hints_maps_spoonacular_payload_to_recipe_hints() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/recipes/complexSearch"
-        assert request.url.params["cuisine"] == "Mediterranean"
+        assert request.url.params["cuisine"] == "Eastern European"
         assert request.url.params["excludeIngredients"] == "оливок"
         assert request.url.params["type"] == "main course"
         return httpx.Response(
@@ -55,9 +55,9 @@ async def test_collect_hints_maps_spoonacular_payload_to_recipe_hints() -> None:
                 "results": [
                     {
                         "id": 101,
-                        "title": "Mediterranean Chicken",
+                        "title": "Georgian Chicken",
                         "sourceUrl": "https://example.test/recipe",
-                        "cuisines": ["Mediterranean"],
+                        "cuisines": ["Eastern European"],
                         "diets": ["gluten free"],
                         "summary": "<b>Bright</b> and fresh dinner",
                         "readyInMinutes": 35,
@@ -91,7 +91,7 @@ async def test_collect_hints_maps_spoonacular_payload_to_recipe_hints() -> None:
         await provider.close()
 
     assert len(hints) == 1
-    assert hints[0].title == "Mediterranean Chicken"
+    assert hints[0].title == "Georgian Chicken"
     assert hints[0].provider == "spoonacular"
     assert hints[0].summary == "Bright and fresh dinner"
     assert [ingredient.name for ingredient in hints[0].ingredients] == [

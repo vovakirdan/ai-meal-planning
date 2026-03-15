@@ -39,6 +39,7 @@ from aimealplanner.presentation.telegram.keyboards.onboarding import (
 )
 from aimealplanner.presentation.telegram.keyboards.planning import (
     CUSTOM_DATES_LABEL,
+    CUSTOM_WEEK_MOOD_LABEL,
     NEXT_WEEK_LABEL,
     TODAY_LABEL,
     TOMORROW_LABEL,
@@ -283,22 +284,34 @@ def build_planning_router(
         text = _require_text(message)
         if text == SKIP_LABEL:
             week_mood = None
+        elif text == CUSTOM_WEEK_MOOD_LABEL:
+            await state.set_state(PlanningStates.custom_week_mood)
+            await message.answer(
+                (
+                    "Напиши свой вариант настроения недели.\n"
+                    "Например: халяль, вегетарианская, уютная домашняя кухня.\n"
+                    "Если уклон не нужен, нажми Пропустить."
+                ),
+                reply_markup=build_skip_keyboard(),
+            )
+            return
         elif text in WEEK_MOOD_LABELS:
             week_mood = WEEK_MOOD_LABELS[text]
         else:
             await message.answer("Выбери настроение недели кнопкой или нажми Пропустить.")
             return
 
-        await state.update_data(selected_week_mood=week_mood)
-        await state.set_state(PlanningStates.weekly_notes)
-        await message.answer(
-            (
-                "Есть ли пожелания или ограничения именно на эту неделю?\n"
-                "Например: хочется попроще, без сахара, побольше рыбы. "
-                "Можно пропустить."
-            ),
-            reply_markup=build_skip_keyboard(),
-        )
+        await _continue_after_week_mood(message, state, week_mood)
+
+    @router.message(PlanningStates.custom_week_mood)
+    async def handle_custom_week_mood(message: Message, state: FSMContext) -> None:
+        text = _require_text(message)
+        week_mood = None if text == SKIP_LABEL else text
+        if week_mood is not None and len(week_mood) > 128:
+            await message.answer("Сделай формулировку короче, до 128 символов.")
+            return
+
+        await _continue_after_week_mood(message, state, week_mood)
 
     @router.message(PlanningStates.weekly_notes)
     async def handle_weekly_notes(message: Message, state: FSMContext) -> None:
@@ -346,6 +359,23 @@ def build_planning_router(
         )
 
     return router
+
+
+async def _continue_after_week_mood(
+    message: Message,
+    state: FSMContext,
+    week_mood: str | None,
+) -> None:
+    await state.update_data(selected_week_mood=week_mood)
+    await state.set_state(PlanningStates.weekly_notes)
+    await message.answer(
+        (
+            "Есть ли пожелания или ограничения именно на эту неделю?\n"
+            "Например: хочется попроще, без сахара, побольше рыбы. "
+            "Можно пропустить."
+        ),
+        reply_markup=build_skip_keyboard(),
+    )
 
 
 async def _ask_template_confirmation(message: Message, state: FSMContext) -> None:
