@@ -199,6 +199,7 @@ async def test_get_latest_draft_overview_renders_days_message() -> None:
 
     assert overview.weekly_plan_id == weekly_plan_id
     assert "Текущий план недели." in overview.text
+    assert "23.03.2026 (понедельник)" in overview.text
     assert "Выбери день" in overview.text
 
 

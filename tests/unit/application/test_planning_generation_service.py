@@ -69,3 +69,5 @@ def test_render_generated_week_plan_orders_days_chronologically() -> None:
     rendered = render_generated_week_plan(context, generated_plan)
 
     assert rendered.index("31.03.2026") < rendered.index("01.04.2026")
+    assert "31.03.2026 (вторник)" in rendered
+    assert "01.04.2026 (среда)" in rendered

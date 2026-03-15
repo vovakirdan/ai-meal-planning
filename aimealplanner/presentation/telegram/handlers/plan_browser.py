@@ -281,10 +281,10 @@ def _format_date(value: date) -> str:
     weekdays = [
         "понедельник",
         "вторник",
-        "среду",
+        "среда",
         "четверг",
-        "пятницу",
-        "субботу",
+        "пятница",
+        "суббота",
         "воскресенье",
     ]
     return f"{value.strftime('%d.%m.%Y')}, {weekdays[value.weekday()]}"

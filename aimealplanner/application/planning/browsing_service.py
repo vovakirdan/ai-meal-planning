@@ -150,5 +150,24 @@ def render_plan_overview(overview: StoredPlanOverview) -> str:
         return "\n".join(lines)
 
     lines.append("")
+    lines.append("План на неделю:")
+    for day in overview.days:
+        lines.append(
+            f"• {day.meal_date.strftime('%d.%m.%Y')} ({_weekday_name(day.meal_date)})",
+        )
+    lines.append("")
     lines.append("Выбери день, чтобы посмотреть блюда подробнее.")
     return "\n".join(lines)
+
+
+def _weekday_name(value: date) -> str:
+    weekdays = [
+        "понедельник",
+        "вторник",
+        "среда",
+        "четверг",
+        "пятница",
+        "суббота",
+        "воскресенье",
+    ]
+    return weekdays[value.weekday()]

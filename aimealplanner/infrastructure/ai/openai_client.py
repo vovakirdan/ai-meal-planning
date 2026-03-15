@@ -114,6 +114,7 @@ Keep dish names and summaries in Russian.
 
 def _build_week_plan_prompt(context: WeeklyPlanGenerationContext) -> str:
     pantry_text = "ignore pantry" if not context.pantry_considered else _render_pantry(context)
+    reference_recipes_text = _render_reference_recipes(context)
     member_lines = "\n".join(
         [
             (
@@ -155,11 +156,16 @@ Week context:
 Household members:
 {member_lines}
 
+Recipe references:
+{reference_recipes_text}
+
 Requirements:
 - Return meals for every date/slot pair listed below.
 - Return 1-2 dish items for each meal.
 - Never use explicitly forbidden ingredients.
 - If pantry is enabled, prefer using what is already at home.
+- You may use the recipe references as optional inspiration, but they are not the source of truth.
+- It is acceptable to ignore the references if they do not fit the household context well.
 - summary must be one short phrase.
 - adaptation_notes must be an empty list if there are no adaptations.
 
@@ -313,3 +319,28 @@ def _render_pantry(context: WeeklyPlanGenerationContext) -> str:
             f"{item.ingredient_name} (stock={item.stock_level.value}{quantity_text}{note_text})",
         )
     return "; ".join(items_text)
+
+
+def _render_reference_recipes(context: WeeklyPlanGenerationContext) -> str:
+    if not context.reference_recipes:
+        return "none"
+
+    lines: list[str] = []
+    for recipe in context.reference_recipes:
+        ingredients_text = (
+            ", ".join(ingredient.name for ingredient in recipe.ingredients[:5])
+            or "no ingredient preview"
+        )
+        cuisines_text = ", ".join(recipe.cuisines) if recipe.cuisines else "n/a"
+        diets_text = ", ".join(recipe.diets) if recipe.diets else "n/a"
+        summary_text = recipe.summary or "no summary"
+        lines.append(
+            (
+                f"- {recipe.title} [provider={recipe.provider} id={recipe.external_id}]: "
+                f"cuisines={cuisines_text}; diets={diets_text}; "
+                f"ready_in_minutes={recipe.ready_in_minutes or 'n/a'}; "
+                f"servings={recipe.servings or 'n/a'}; "
+                f"ingredients={ingredients_text}; summary={summary_text}"
+            ),
+        )
+    return "\n".join(lines)

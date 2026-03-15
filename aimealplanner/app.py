@@ -13,6 +13,7 @@ from aimealplanner.core.logging import configure_logging
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.db.initialization import verify_database_connection
 from aimealplanner.infrastructure.db.session import build_engine, build_session_factory
+from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
 from aimealplanner.infrastructure.redis.client import build_redis, verify_redis
 from aimealplanner.presentation.telegram.router import build_router
 
@@ -28,6 +29,7 @@ class AppRuntime:
     session_factory: async_sessionmaker[AsyncSession]
     redis: Redis
     weekly_plan_generator: OpenAIWeeklyPlanGenerator
+    recipe_hint_provider: SpoonacularRecipeHintProvider | None
 
 
 def build_runtime(settings: Settings | None = None) -> AppRuntime:
@@ -38,9 +40,16 @@ def build_runtime(settings: Settings | None = None) -> AppRuntime:
     session_factory = build_session_factory(engine)
     redis = build_redis(resolved_settings.redis_url)
     weekly_plan_generator = OpenAIWeeklyPlanGenerator.from_settings(resolved_settings)
+    recipe_hint_provider = SpoonacularRecipeHintProvider.from_settings(resolved_settings)
     bot = Bot(token=resolved_settings.bot_token)
     dispatcher = Dispatcher(storage=RedisStorage(redis=redis))
-    dispatcher.include_router(build_router(session_factory, weekly_plan_generator))
+    dispatcher.include_router(
+        build_router(
+            session_factory,
+            weekly_plan_generator,
+            recipe_hint_provider=recipe_hint_provider,
+        ),
+    )
 
     return AppRuntime(
         settings=resolved_settings,
@@ -50,6 +59,7 @@ def build_runtime(settings: Settings | None = None) -> AppRuntime:
         session_factory=session_factory,
         redis=redis,
         weekly_plan_generator=weekly_plan_generator,
+        recipe_hint_provider=recipe_hint_provider,
     )
 
 
@@ -63,5 +73,7 @@ async def run() -> None:
     finally:
         await runtime.bot.session.close()
         await runtime.redis.aclose()
+        if runtime.recipe_hint_provider is not None:
+            await runtime.recipe_hint_provider.close()
         await runtime.weekly_plan_generator.close()
         await runtime.engine.dispose()

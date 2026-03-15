@@ -21,6 +21,7 @@ from aimealplanner.application.planning import (
 )
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
+from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
 from aimealplanner.presentation.telegram.keyboards.onboarding import (
     NO_LABEL,
     SKIP_LABEL,
@@ -49,6 +50,8 @@ logger = logging.getLogger(__name__)
 def build_planning_router(
     session_factory: async_sessionmaker[AsyncSession],
     weekly_plan_generator: OpenAIWeeklyPlanGenerator,
+    *,
+    recipe_hint_provider: SpoonacularRecipeHintProvider | None,
 ) -> Router:
     router = Router(name="planning")
     service = PlanningService(session_factory, build_planning_repositories)
@@ -56,6 +59,7 @@ def build_planning_router(
         session_factory,
         build_planning_repositories,
         weekly_plan_generator,
+        recipe_hint_provider=recipe_hint_provider,
     )
 
     @router.message(Command("plan"))

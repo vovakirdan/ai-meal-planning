@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from uuid import UUID
 
@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from aimealplanner.application.planning.generation_dto import (
     GeneratedMeal,
     GeneratedWeekPlan,
+    RecipeHintProvider,
     WeeklyPlanGenerationClient,
     WeeklyPlanGenerationContext,
 )
@@ -29,10 +30,12 @@ class WeeklyPlanGenerationService:
         session_factory: async_sessionmaker[AsyncSession],
         repositories_factory: PlanningRepositoryBundleFactory,
         generation_client: WeeklyPlanGenerationClient,
+        recipe_hint_provider: RecipeHintProvider | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._repositories_factory = repositories_factory
         self._generation_client = generation_client
+        self._recipe_hint_provider = recipe_hint_provider
 
     async def generate_for_plan(self, weekly_plan_id: UUID) -> GeneratedWeekPlanResult:
         async with self._session_factory() as session:
@@ -43,17 +46,22 @@ class WeeklyPlanGenerationService:
             if context is None:
                 raise ValueError("Черновик плана не найден.")
 
-            generated_plan = await self._generation_client.generate_week_plan(context)
+            enriched_context = context
+            if self._recipe_hint_provider is not None:
+                reference_recipes = await self._recipe_hint_provider.collect_hints(context)
+                enriched_context = replace(context, reference_recipes=reference_recipes)
+
+            generated_plan = await self._generation_client.generate_week_plan(enriched_context)
             await repositories.weekly_plan_repository.replace_generated_meals(
-                context.weekly_plan_id,
+                enriched_context.weekly_plan_id,
                 generated_plan,
             )
             await session.commit()
             return GeneratedWeekPlanResult(
-                weekly_plan_id=context.weekly_plan_id,
-                start_date=context.start_date,
-                end_date=context.end_date,
-                rendered_message=render_generated_week_plan(context, generated_plan),
+                weekly_plan_id=enriched_context.weekly_plan_id,
+                start_date=enriched_context.start_date,
+                end_date=enriched_context.end_date,
+                rendered_message=render_generated_week_plan(enriched_context, generated_plan),
             )
 
 
@@ -73,7 +81,7 @@ def render_generated_week_plan(
     lines = [header]
     for meal_date in sorted(meals_by_day):
         lines.append("")
-        lines.append(meal_date.strftime("%d.%m.%Y"))
+        lines.append(f"{meal_date.strftime('%d.%m.%Y')} ({_weekday_name(meal_date)})")
         for meal in meals_by_day[meal_date]:
             item_names = ", ".join(item.name for item in meal.items)
             lines.append(f"{_render_slot_name(meal.slot)}: {item_names}")
@@ -92,3 +100,16 @@ def _render_slot_name(slot: str) -> str:
     if slot not in slot_labels:
         raise ValueError(f"Unknown meal slot: {slot}")
     return slot_labels[slot]
+
+
+def _weekday_name(value: date) -> str:
+    weekdays = [
+        "понедельник",
+        "вторник",
+        "среда",
+        "четверг",
+        "пятница",
+        "суббота",
+        "воскресенье",
+    ]
+    return weekdays[value.weekday()]

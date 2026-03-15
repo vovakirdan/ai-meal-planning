@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Any, Protocol
@@ -27,6 +27,26 @@ class PlanningPantryItemContext:
 
 
 @dataclass(frozen=True, slots=True)
+class RecipeHintIngredient:
+    name: str
+    amount: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecipeHint:
+    provider: str
+    external_id: str
+    title: str
+    source_url: str | None
+    cuisines: list[str]
+    diets: list[str]
+    summary: str | None
+    ready_in_minutes: int | None
+    servings: int | None
+    ingredients: list[RecipeHintIngredient]
+
+
+@dataclass(frozen=True, slots=True)
 class WeeklyPlanGenerationContext:
     weekly_plan_id: UUID
     household_id: UUID
@@ -43,6 +63,7 @@ class WeeklyPlanGenerationContext:
     context_payload: dict[str, Any]
     members: list[PlanningMemberContext]
     pantry_items: list[PlanningPantryItemContext]
+    reference_recipes: list[RecipeHint] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,3 +91,10 @@ class WeeklyPlanGenerationClient(Protocol):
         self,
         context: WeeklyPlanGenerationContext,
     ) -> GeneratedWeekPlan: ...
+
+
+class RecipeHintProvider(Protocol):
+    async def collect_hints(
+        self,
+        context: WeeklyPlanGenerationContext,
+    ) -> list[RecipeHint]: ...

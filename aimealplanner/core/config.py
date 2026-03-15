@@ -13,6 +13,7 @@ _DEFAULT_DATABASE_URL = (
     "postgresql+asyncpg://aimealplanner:aimealplanner@postgres:5432/aimealplanner"
 )
 _DEFAULT_REDIS_URL = "redis://redis:6379/0"
+_DEFAULT_SPOONACULAR_BASE_URL = "https://api.spoonacular.com"
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +24,8 @@ class Settings:
     ai_api_key: str
     ai_model: str
     ai_base_url: str
+    spoonacular_api_key: str | None
+    spoonacular_base_url: str
     app_env: AppEnv
     log_level: str
 
@@ -49,6 +52,8 @@ class Settings:
         if not ai_base_url:
             raise ValueError("AI_BASE_URL is required")
 
+        spoonacular_api_key = os.getenv("SPOONACULAR_API_KEY", "").strip() or None
+
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
         if log_level not in _ALLOWED_LOG_LEVELS:
             raise ValueError(
@@ -68,6 +73,11 @@ class Settings:
             ai_api_key=ai_api_key,
             ai_model=ai_model,
             ai_base_url=ai_base_url,
+            spoonacular_api_key=spoonacular_api_key,
+            spoonacular_base_url=os.getenv(
+                "SPOONACULAR_BASE_URL",
+                _DEFAULT_SPOONACULAR_BASE_URL,
+            ),
             app_env=cast(AppEnv, app_env),
             log_level=log_level,
         )

@@ -12,6 +12,8 @@ def clear_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AI_API_KEY",
         "AI_MODEL",
         "AI_BASE_URL",
+        "SPOONACULAR_API_KEY",
+        "SPOONACULAR_BASE_URL",
         "APP_ENV",
         "LOG_LEVEL",
     ):
@@ -33,6 +35,8 @@ def test_settings_load_defaults_from_env(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.redis_url.startswith("redis://")
     assert settings.ai_model == "chatgpt/gpt-5.2"
     assert settings.ai_base_url == "https://example.test/v1"
+    assert settings.spoonacular_api_key is None
+    assert settings.spoonacular_base_url == "https://api.spoonacular.com"
 
 
 def test_settings_reject_placeholder_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
