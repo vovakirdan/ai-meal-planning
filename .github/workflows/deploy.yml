@@ -1,0 +1,154 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  quality:
+    name: Quality / ${{ matrix.check.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - name: ruff
+            command: uv run ruff check aimealplanner tests
+          - name: ty
+            command: uv run ty check
+          - name: pytest
+            command: uv run pytest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7.5.0
+
+      - name: Install dependencies
+        run: uv sync --frozen --dev
+
+      - name: Run ${{ matrix.check.name }}
+        run: ${{ matrix.check.command }}
+
+  build:
+    name: Build and Push Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: quality
+    outputs:
+      image_name: ${{ steps.image.outputs.name }}
+      image_tag: ${{ steps.image.outputs.tag }}
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6.0.2
+
+      - name: Compute image coordinates
+        id: image
+        run: |
+          echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ai-meal-planning-bot" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push bot image
+        uses: docker/build-push-action@v7.0.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          provenance: false
+          tags: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
+
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    environment: production
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6.0.2
+
+      - name: Require default branch
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "${{ github.event.repository.default_branch }}" ]; then
+            echo "Production deploy must be started from ${{ github.event.repository.default_branch }}."
+            exit 1
+          fi
+
+      - name: Prepare SSH key
+        run: |
+          install -m 700 -d ~/.ssh
+          cat <<'EOF' > ~/.ssh/id_ed25519
+          ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          EOF
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${{ vars.DEPLOY_PORT || '22' }}" "${{ vars.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Prepare production env file
+        run: |
+          cat <<'EOF' > .deploy.env
+          ${{ secrets.PRODUCTION_ENV_FILE }}
+          EOF
+
+      - name: Upload compose and env files
+        run: |
+          ssh -p "${{ vars.DEPLOY_PORT || '22' }}" "${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}" \
+            "mkdir -p '${{ vars.DEPLOY_PATH }}'"
+          scp -P "${{ vars.DEPLOY_PORT || '22' }}" compose.prod.yaml \
+            "${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}:${{ vars.DEPLOY_PATH }}/compose.prod.yaml"
+          scp -P "${{ vars.DEPLOY_PORT || '22' }}" .deploy.env \
+            "${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}:${{ vars.DEPLOY_PATH }}/.env"
+
+      - name: Pull and restart stack
+        env:
+          BOT_IMAGE: ${{ needs.build.outputs.image_name }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          GHCR_PULL_USERNAME: ${{ secrets.GHCR_PULL_USERNAME }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          remote_cmd=$(cat <<EOF
+          set -eu
+          cd "${{ vars.DEPLOY_PATH }}"
+          echo "${GHCR_PULL_TOKEN}" | docker login ghcr.io -u "${GHCR_PULL_USERNAME}" --password-stdin
+          export BOT_IMAGE="${BOT_IMAGE}"
+          export IMAGE_TAG="${IMAGE_TAG}"
+          docker compose -f compose.prod.yaml config -q
+          docker compose -f compose.prod.yaml pull
+          docker compose -f compose.prod.yaml up -d --remove-orphans
+          docker image prune -f
+          EOF
+          )
+          ssh -p "${{ vars.DEPLOY_PORT || '22' }}" "${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}" "${remote_cmd}"
+
+      - name: Cleanup local secrets
+        if: always()
+        run: rm -f .deploy.env ~/.ssh/id_ed25519
