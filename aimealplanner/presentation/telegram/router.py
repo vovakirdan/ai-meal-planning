@@ -12,6 +12,9 @@ from aimealplanner.presentation.telegram.handlers.plan_browser import (
 from aimealplanner.presentation.telegram.handlers.planning import (
     build_planning_router,
 )
+from aimealplanner.presentation.telegram.handlers.recipe import (
+    build_recipe_router,
+)
 from aimealplanner.presentation.telegram.handlers.review import (
     build_review_router,
 )
@@ -34,6 +37,13 @@ def build_router(
     )
     router.include_router(
         build_plan_browser_router(
+            session_factory,
+            weekly_plan_generator=weekly_plan_generator,
+            recipe_hint_provider=recipe_hint_provider,
+        ),
+    )
+    router.include_router(
+        build_recipe_router(
             session_factory,
             weekly_plan_generator=weekly_plan_generator,
             recipe_hint_provider=recipe_hint_provider,

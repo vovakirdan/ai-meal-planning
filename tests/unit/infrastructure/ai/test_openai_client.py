@@ -13,6 +13,7 @@ from aimealplanner.application.planning.generation_dto import (
 from aimealplanner.infrastructure.ai.openai_client import (
     _parse_adjustment_payload,
     _parse_feedback_comment_payload,
+    _parse_recipe_details_payload,
     _parse_replacement_payload,
     _parse_week_plan_payload,
 )
@@ -276,3 +277,68 @@ def test_parse_feedback_comment_payload_allows_empty_result() -> None:
     parsed = _parse_feedback_comment_payload(raw_content)
 
     assert parsed == {}
+
+
+def test_parse_recipe_details_payload_accepts_complete_recipe_details() -> None:
+    raw_content = json.dumps(
+        {
+            "summary": "Мягкая домашняя версия блюда",
+            "ingredients": [
+                {
+                    "name": "Тофу",
+                    "amount": "300 г",
+                    "preparation_note": "нарезать кубиками",
+                },
+                {
+                    "name": "Рисовая лапша",
+                    "amount": "200 г",
+                    "preparation_note": None,
+                },
+                {
+                    "name": "тофу",
+                    "amount": "300 г",
+                    "preparation_note": "дубликат",
+                },
+            ],
+            "preparation_steps": [" Подготовить овощи. "],
+            "cooking_steps": [" Быстро обжарить ингредиенты. "],
+            "serving_steps": [" Подать сразу. "],
+            "prep_time_minutes": 15,
+            "cook_time_minutes": 12,
+            "serving_notes": " Добавить кунжут перед подачей. ",
+        },
+    )
+
+    parsed = _parse_recipe_details_payload(raw_content)
+
+    assert parsed.summary == "Мягкая домашняя версия блюда"
+    assert [ingredient.name for ingredient in parsed.ingredients] == [
+        "Тофу",
+        "Рисовая лапша",
+    ]
+    assert parsed.ingredients[0].amount == "300 г"
+    assert parsed.ingredients[0].preparation_note == "нарезать кубиками"
+    assert parsed.preparation_steps == ["Подготовить овощи."]
+    assert parsed.cooking_steps == ["Быстро обжарить ингредиенты."]
+    assert parsed.serving_steps == ["Подать сразу."]
+    assert parsed.prep_time_minutes == 15
+    assert parsed.cook_time_minutes == 12
+    assert parsed.serving_notes == "Добавить кунжут перед подачей."
+
+
+def test_parse_recipe_details_payload_rejects_missing_ingredients() -> None:
+    raw_content = json.dumps(
+        {
+            "summary": "Пустой рецепт",
+            "ingredients": [],
+            "preparation_steps": [],
+            "cooking_steps": [],
+            "serving_steps": [],
+            "prep_time_minutes": None,
+            "cook_time_minutes": None,
+            "serving_notes": None,
+        },
+    )
+
+    with pytest.raises(ValueError, match="must include at least one ingredient"):
+        _parse_recipe_details_payload(raw_content)

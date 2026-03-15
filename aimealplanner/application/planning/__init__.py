@@ -25,6 +25,18 @@ from aimealplanner.application.planning.generation_service import (
 from aimealplanner.application.planning.policy_service import (
     DishPolicyService,
 )
+from aimealplanner.application.planning.recipe_dto import (
+    RecipeDayContext,
+    RecipeDayOption,
+    RecipeDetails,
+    RecipeIngredient,
+    RecipeItemOption,
+    RecipeStartContext,
+)
+from aimealplanner.application.planning.recipe_service import (
+    RecipeItemResult,
+    RecipeService,
+)
 from aimealplanner.application.planning.replacement_dto import (
     PlannedMealItemReplacement,
     ReplacementCandidate,
@@ -48,6 +60,14 @@ __all__ = [
     "PlanningBrowsingService",
     "PlanningService",
     "PlanningStartContext",
+    "RecipeDayContext",
+    "RecipeDayOption",
+    "RecipeDetails",
+    "RecipeIngredient",
+    "RecipeItemOption",
+    "RecipeItemResult",
+    "RecipeService",
+    "RecipeStartContext",
     "RenderablePlanOverview",
     "ReplacementCandidate",
     "ReplacementSuggestionResult",

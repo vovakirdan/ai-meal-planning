@@ -1,6 +1,7 @@
 # ruff: noqa: RUF001
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import asdict
 from datetime import date
@@ -21,6 +22,7 @@ from aimealplanner.application.planning import (
     PlannedMealItemReplacement,
     PlanningBrowsingService,
     PlanningService,
+    RecipeService,
     ReplacementCandidate,
 )
 from aimealplanner.application.planning.browsing_dto import (
@@ -58,6 +60,7 @@ from aimealplanner.presentation.telegram.keyboards.planning import (
 from aimealplanner.presentation.telegram.states.plan_browser import PlanBrowserStates
 
 logger = logging.getLogger(__name__)
+_background_tasks: set[asyncio.Task[None]] = set()
 
 
 def build_plan_browser_router(
@@ -69,6 +72,12 @@ def build_plan_browser_router(
     router = Router(name="plan_browser")
     browsing_service = PlanningBrowsingService(session_factory, build_planning_repositories)
     planning_service = PlanningService(session_factory, build_planning_repositories)
+    recipe_service = RecipeService(
+        session_factory,
+        build_planning_repositories,
+        recipe_client=weekly_plan_generator,
+        recipe_hint_provider=recipe_hint_provider,
+    )
     policy_service = DishPolicyService(
         session_factory,
         build_planning_repositories,
@@ -169,6 +178,15 @@ def build_plan_browser_router(
             answer_callback=False,
         )
         await callback.answer("План на неделю подтвержден.")
+        warmup_task = asyncio.create_task(
+            _warm_confirmed_plan_recipes(
+                recipe_service=recipe_service,
+                telegram_user_id=_require_telegram_user_id_from_callback(callback),
+                weekly_plan_id=overview.weekly_plan_id,
+            ),
+        )
+        _background_tasks.add(warmup_task)
+        warmup_task.add_done_callback(_background_tasks.discard)
 
     @router.callback_query(F.data.startswith("pd:"))
     async def handle_plan_day_callback(callback: CallbackQuery) -> None:
@@ -1021,3 +1039,25 @@ async def _clear_replacement_candidates(state: FSMContext, planned_meal_item_id:
     )
     replacement_candidates.pop(planned_meal_item_id.hex, None)
     await state.update_data(replacement_candidates=replacement_candidates)
+
+
+async def _warm_confirmed_plan_recipes(
+    *,
+    recipe_service: RecipeService,
+    telegram_user_id: int,
+    weekly_plan_id: UUID,
+) -> None:
+    try:
+        generated_count = await recipe_service.warm_plan_recipes(
+            telegram_user_id,
+            weekly_plan_id,
+        )
+    except Exception:
+        logger.exception("recipe warm-up failed for confirmed weekly plan %s", weekly_plan_id)
+        return
+
+    logger.info(
+        "recipe warm-up completed for weekly plan %s; generated=%s",
+        weekly_plan_id,
+        generated_count,
+    )

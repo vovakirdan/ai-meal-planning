@@ -19,6 +19,10 @@ from aimealplanner.application.planning.generation_dto import (
     RecipeHint,
     WeeklyPlanGenerationContext,
 )
+from aimealplanner.application.planning.recipe_dto import (
+    RecipeDetails,
+    RecipeIngredient,
+)
 from aimealplanner.application.planning.replacement_dto import ReplacementCandidate
 from aimealplanner.core.config import Settings
 from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict
@@ -84,6 +88,27 @@ class _FeedbackCommentModel(BaseModel):
 
     planning_note: str | None = None
     restriction_candidate: str | None = None
+
+
+class _RecipeIngredientModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    amount: str | None = None
+    preparation_note: str | None = None
+
+
+class _RecipeDetailsModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str | None = None
+    ingredients: list[_RecipeIngredientModel] = Field(default_factory=list)
+    preparation_steps: list[str] = Field(default_factory=list)
+    cooking_steps: list[str] = Field(default_factory=list)
+    serving_steps: list[str] = Field(default_factory=list)
+    prep_time_minutes: int | None = None
+    cook_time_minutes: int | None = None
+    serving_notes: str | None = None
 
 
 @dataclass(slots=True)
@@ -232,6 +257,61 @@ class OpenAIWeeklyPlanGenerator:
             )
             return _parse_feedback_comment_payload(repaired_content)
 
+    async def expand_item_recipe(
+        self,
+        *,
+        item_view: StoredPlanItemView,
+        generation_context: WeeklyPlanGenerationContext,
+        reference_recipes: list[RecipeHint],
+    ) -> RecipeDetails:
+        raw_content = await self._request_json(
+            system_prompt=_RECIPE_DETAILS_SYSTEM_PROMPT,
+            user_prompt=_build_recipe_details_prompt(
+                item_view=item_view,
+                generation_context=generation_context,
+                reference_recipes=reference_recipes,
+            ),
+        )
+        try:
+            return _parse_recipe_details_payload(raw_content)
+        except ValueError as err:
+            logger.warning("recipe details payload validation failed, attempting repair: %s", err)
+            repaired_content = await self._request_json(
+                system_prompt=_RECIPE_DETAILS_SYSTEM_PROMPT,
+                user_prompt=_build_replacement_repair_prompt(raw_content, str(err)),
+            )
+            return _parse_recipe_details_payload(repaired_content)
+
+    async def adjust_item_recipe(
+        self,
+        *,
+        item_view: StoredPlanItemView,
+        generation_context: WeeklyPlanGenerationContext,
+        instruction: str,
+        reference_recipes: list[RecipeHint],
+    ) -> RecipeDetails:
+        raw_content = await self._request_json(
+            system_prompt=_RECIPE_DETAILS_SYSTEM_PROMPT,
+            user_prompt=_build_recipe_adjustment_prompt(
+                item_view=item_view,
+                generation_context=generation_context,
+                instruction=instruction,
+                reference_recipes=reference_recipes,
+            ),
+        )
+        try:
+            return _parse_recipe_details_payload(raw_content)
+        except ValueError as err:
+            logger.warning(
+                "recipe adjustment payload validation failed, attempting repair: %s",
+                err,
+            )
+            repaired_content = await self._request_json(
+                system_prompt=_RECIPE_DETAILS_SYSTEM_PROMPT,
+                user_prompt=_build_replacement_repair_prompt(raw_content, str(err)),
+            )
+            return _parse_recipe_details_payload(repaired_content)
+
     async def _request_json(
         self,
         *,
@@ -298,6 +378,15 @@ Return valid JSON only.
 Do not use markdown fences.
 Do not add commentary outside the JSON object.
 Write concise Russian planning notes.
+""".strip()
+
+
+_RECIPE_DETAILS_SYSTEM_PROMPT = """
+You expand one dish into a practical home-cooking recipe for a Telegram meal planner bot.
+Return valid JSON only.
+Do not use markdown fences.
+Do not add commentary outside the JSON object.
+Keep recipe text in Russian.
 """.strip()
 
 
@@ -621,6 +710,134 @@ Required JSON shape:
 """.strip()
 
 
+def _build_recipe_details_prompt(
+    *,
+    item_view: StoredPlanItemView,
+    generation_context: WeeklyPlanGenerationContext,
+    reference_recipes: list[RecipeHint],
+) -> str:
+    return f"""
+Expand one weekly plan dish into a practical recipe.
+
+Dish:
+- name: {item_view.name}
+- summary: {item_view.summary or "нет"}
+- slot: {item_view.slot}
+- meal_date: {item_view.meal_date.isoformat()}
+- adaptation_notes: {_render_list(item_view.adaptation_notes)}
+
+Household context:
+{_render_household_members(generation_context)}
+
+Week context:
+- week_mood: {generation_context.week_mood or "без явного уклона"}
+- weekly_notes: {generation_context.weekly_notes or "нет"}
+- repeatability_mode: {generation_context.repeatability_mode.value}
+
+Existing household dish memory:
+{_render_household_policies(generation_context.household_policies)}
+
+Optional recipe references:
+{_render_replacement_reference_recipes(reference_recipes)}
+
+Requirements:
+- Build a realistic home recipe, not restaurant plating.
+- Respect constraints and adaptation notes.
+- ingredients should be concrete and usable for shopping.
+- preparation_steps, cooking_steps and serving_steps may be empty lists if not needed,
+  but ingredients must not be empty.
+- Keep 3-8 ingredients for simple dishes, more only when clearly needed.
+- Keep steps concise.
+- prep_time_minutes and cook_time_minutes are optional integers.
+
+Required JSON shape:
+{{
+  "summary": "string or null",
+  "ingredients": [
+    {{
+      "name": "string",
+      "amount": "string or null",
+      "preparation_note": "string or null"
+    }}
+  ],
+  "preparation_steps": ["string"],
+  "cooking_steps": ["string"],
+  "serving_steps": ["string"],
+  "prep_time_minutes": 10,
+  "cook_time_minutes": 20,
+  "serving_notes": "string or null"
+}}
+""".strip()
+
+
+def _build_recipe_adjustment_prompt(
+    *,
+    item_view: StoredPlanItemView,
+    generation_context: WeeklyPlanGenerationContext,
+    instruction: str,
+    reference_recipes: list[RecipeHint],
+) -> str:
+    return f"""
+Refine one existing recipe for a weekly plan dish after user feedback.
+
+Dish:
+- name: {item_view.name}
+- summary: {item_view.summary or "нет"}
+- slot: {item_view.slot}
+- meal_date: {item_view.meal_date.isoformat()}
+- adaptation_notes: {_render_list(item_view.adaptation_notes)}
+
+Current saved recipe:
+{_render_current_recipe_snapshot(item_view)}
+
+Household context:
+{_render_household_members(generation_context)}
+
+Week context:
+- week_mood: {generation_context.week_mood or "без явного уклона"}
+- weekly_notes: {generation_context.weekly_notes or "нет"}
+- repeatability_mode: {generation_context.repeatability_mode.value}
+
+Existing household dish memory:
+{_render_household_policies(generation_context.household_policies)}
+
+Optional recipe references:
+{_render_replacement_reference_recipes(reference_recipes)}
+
+User correction request:
+- instruction: {instruction}
+
+Requirements:
+- Keep the same core dish unless the user clearly asks for a deeper change.
+- Fix the recipe logic according to the user's note.
+- Preserve suitability for the same meal slot.
+- Respect constraints and adaptation notes.
+- ingredients should be concrete and usable for shopping.
+- preparation_steps, cooking_steps and serving_steps may be empty lists if not needed,
+  but ingredients must not be empty.
+- Keep steps concise and practical for home cooking.
+- prep_time_minutes and cook_time_minutes are optional integers.
+
+Required JSON shape:
+{{
+  "summary": "string or null",
+  "ingredients": [
+    {{
+      "name": "string",
+      "amount": "string or null",
+      "preparation_note": "string or null"
+    }}
+  ],
+  "preparation_steps": ["string"],
+  "cooking_steps": ["string"],
+  "serving_steps": ["string"],
+  "prep_time_minutes": 10,
+  "cook_time_minutes": 20,
+  "serving_notes": "string or null"
+}}
+""".strip()
+
+
 def _parse_week_plan_payload(
     context: WeeklyPlanGenerationContext,
     raw_content: str,
@@ -819,6 +1036,53 @@ def _parse_feedback_comment_payload(raw_content: str) -> dict[str, object]:
     return normalized_notes
 
 
+def _parse_recipe_details_payload(raw_content: str) -> RecipeDetails:
+    try:
+        payload = json.loads(raw_content)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"AI returned invalid JSON for recipe details: {err}") from err
+
+    try:
+        parsed = _RecipeDetailsModel.model_validate(payload)
+    except ValidationError as err:
+        raise ValueError(f"AI recipe details payload failed schema validation: {err}") from err
+
+    ingredients: list[RecipeIngredient] = []
+    seen_names: set[str] = set()
+    for ingredient in parsed.ingredients:
+        normalized_name = ingredient.name.strip().casefold()
+        if not normalized_name or normalized_name in seen_names:
+            continue
+        seen_names.add(normalized_name)
+        ingredients.append(
+            RecipeIngredient(
+                name=ingredient.name.strip(),
+                amount=ingredient.amount.strip() if isinstance(ingredient.amount, str) else None,
+                preparation_note=(
+                    ingredient.preparation_note.strip()
+                    if isinstance(ingredient.preparation_note, str)
+                    else None
+                ),
+            ),
+        )
+
+    if not ingredients:
+        raise ValueError("Recipe details must include at least one ingredient")
+
+    return RecipeDetails(
+        summary=parsed.summary.strip() if isinstance(parsed.summary, str) else None,
+        ingredients=ingredients,
+        preparation_steps=_clean_step_list(parsed.preparation_steps),
+        cooking_steps=_clean_step_list(parsed.cooking_steps),
+        serving_steps=_clean_step_list(parsed.serving_steps),
+        prep_time_minutes=parsed.prep_time_minutes,
+        cook_time_minutes=parsed.cook_time_minutes,
+        serving_notes=(
+            parsed.serving_notes.strip() if isinstance(parsed.serving_notes, str) else None
+        ),
+    )
+
+
 def _iter_dates(start_date: date, end_date: date) -> list[date]:
     current_date = start_date
     dates: list[date] = []
@@ -977,6 +1241,10 @@ def _render_reference_recipes(context: WeeklyPlanGenerationContext) -> str:
     return "\n".join(lines)
 
 
+def _clean_step_list(steps: list[str]) -> list[str]:
+    return [step.strip() for step in steps if step.strip()]
+
+
 def _render_replacement_reference_recipes(reference_recipes: list[RecipeHint]) -> str:
     if not reference_recipes:
         return "none"
@@ -994,3 +1262,57 @@ def _render_replacement_reference_recipes(reference_recipes: list[RecipeHint]) -
             ),
         )
     return "\n".join(lines)
+
+
+def _render_current_recipe_snapshot(item_view: StoredPlanItemView) -> str:
+    payload = item_view.snapshot_payload
+    ingredient_lines: list[str] = []
+    raw_ingredients = payload.get("ingredients")
+    if isinstance(raw_ingredients, list):
+        for raw_ingredient in raw_ingredients:
+            if not isinstance(raw_ingredient, dict):
+                continue
+            name = raw_ingredient.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            line = name.strip()
+            amount = raw_ingredient.get("amount")
+            if isinstance(amount, str) and amount.strip():
+                line += f" — {amount.strip()}"
+            note = raw_ingredient.get("preparation_note")
+            if isinstance(note, str) and note.strip():
+                line += f" ({note.strip()})"
+            ingredient_lines.append(line)
+
+    def render_steps(field_name: str) -> str:
+        raw_steps = payload.get(field_name)
+        if not isinstance(raw_steps, list):
+            return "нет"
+        normalized_steps = [
+            step.strip() for step in raw_steps if isinstance(step, str) and step.strip()
+        ]
+        return "; ".join(normalized_steps) if normalized_steps else "нет"
+
+    serving_notes = payload.get("serving_notes")
+    prep_time = payload.get("prep_time_minutes")
+    cook_time = payload.get("cook_time_minutes")
+    return "\n".join(
+        [
+            f"- summary: {item_view.summary or 'нет'}",
+            (
+                f"- ingredients: {'; '.join(ingredient_lines)}"
+                if ingredient_lines
+                else "- ingredients: нет"
+            ),
+            f"- preparation_steps: {render_steps('preparation_steps')}",
+            f"- cooking_steps: {render_steps('cooking_steps')}",
+            f"- serving_steps: {render_steps('serving_steps')}",
+            f"- prep_time_minutes: {prep_time if isinstance(prep_time, int) else 'нет'}",
+            f"- cook_time_minutes: {cook_time if isinstance(cook_time, int) else 'нет'}",
+            (
+                f"- serving_notes: {serving_notes.strip()}"
+                if isinstance(serving_notes, str) and serving_notes.strip()
+                else "- serving_notes: нет"
+            ),
+        ],
+    )
