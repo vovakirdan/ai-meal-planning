@@ -27,6 +27,15 @@ class StoredPlanningHousehold:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredPlanningMember:
+    id: UUID
+    household_id: UUID
+    display_name: str
+    sort_order: int
+    is_active: bool
+
+
+@dataclass(frozen=True, slots=True)
 class StoredDraftPlan:
     id: UUID
     start_date: date

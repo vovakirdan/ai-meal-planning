@@ -21,6 +21,7 @@ from aimealplanner.application.planning.generation_dto import (
 )
 from aimealplanner.application.planning.replacement_dto import ReplacementCandidate
 from aimealplanner.core.config import Settings
+from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,13 @@ class _PolicyReasonModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     policy_note: str | None = None
+
+
+class _FeedbackCommentModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    planning_note: str | None = None
+    restriction_candidate: str | None = None
 
 
 @dataclass(slots=True)
@@ -195,6 +203,35 @@ class OpenAIWeeklyPlanGenerator:
             )
             return _parse_policy_reason_payload(repaired_content)
 
+    async def normalize_feedback_comment(
+        self,
+        *,
+        item_view: StoredPlanItemView,
+        generation_context: WeeklyPlanGenerationContext,
+        household_member_name: str,
+        verdict: DishFeedbackVerdict,
+        raw_comment: str,
+    ) -> dict[str, object]:
+        raw_content = await self._request_json(
+            system_prompt=_FEEDBACK_COMMENT_SYSTEM_PROMPT,
+            user_prompt=_build_feedback_comment_prompt(
+                item_view=item_view,
+                generation_context=generation_context,
+                household_member_name=household_member_name,
+                verdict=verdict,
+                raw_comment=raw_comment,
+            ),
+        )
+        try:
+            return _parse_feedback_comment_payload(raw_content)
+        except ValueError as err:
+            logger.warning("feedback comment payload validation failed, attempting repair: %s", err)
+            repaired_content = await self._request_json(
+                system_prompt=_FEEDBACK_COMMENT_SYSTEM_PROMPT,
+                user_prompt=_build_replacement_repair_prompt(raw_content, str(err)),
+            )
+            return _parse_feedback_comment_payload(repaired_content)
+
     async def _request_json(
         self,
         *,
@@ -255,20 +292,20 @@ Write the normalized note in Russian.
 """.strip()
 
 
+_FEEDBACK_COMMENT_SYSTEM_PROMPT = """
+You normalize post-meal dish feedback for a Telegram meal planner bot.
+Return valid JSON only.
+Do not use markdown fences.
+Do not add commentary outside the JSON object.
+Write concise Russian planning notes.
+""".strip()
+
+
 def _build_week_plan_prompt(context: WeeklyPlanGenerationContext) -> str:
     pantry_text = "ignore pantry" if not context.pantry_considered else _render_pantry(context)
     reference_recipes_text = _render_reference_recipes(context)
     policy_text = _render_household_policies(context.household_policies)
-    member_lines = "\n".join(
-        [
-            (
-                f"- {member.display_name}: ограничения={_render_list(member.constraints)}, "
-                f"любит={_render_list(member.favorite_cuisines)}, "
-                f"заметка={member.profile_note or 'нет'}"
-            )
-            for member in context.members
-        ],
-    )
+    member_lines = _render_household_members(context)
     expected_slots = ", ".join(context.active_slots)
     expected_meals = "\n".join(
         [
@@ -388,16 +425,7 @@ def _build_replacement_prompt(
     generation_context: WeeklyPlanGenerationContext,
     reference_recipes: list[RecipeHint],
 ) -> str:
-    other_constraints = "\n".join(
-        [
-            (
-                f"- {member.display_name}: ограничения={_render_list(member.constraints)}, "
-                f"любит={_render_list(member.favorite_cuisines)}, "
-                f"заметка={member.profile_note or 'нет'}"
-            )
-            for member in generation_context.members
-        ],
-    )
+    other_constraints = _render_household_members(generation_context)
     references_text = _render_replacement_reference_recipes(reference_recipes)
     policy_text = _render_household_policies(generation_context.household_policies)
     return f"""
@@ -464,16 +492,7 @@ def _build_adjustment_prompt(
 ) -> str:
     references_text = _render_replacement_reference_recipes(reference_recipes)
     policy_text = _render_household_policies(generation_context.household_policies)
-    household_lines = "\n".join(
-        [
-            (
-                f"- {member.display_name}: ограничения={_render_list(member.constraints)}, "
-                f"любит={_render_list(member.favorite_cuisines)}, "
-                f"заметка={member.profile_note or 'нет'}"
-            )
-            for member in generation_context.members
-        ],
-    )
+    household_lines = _render_household_members(generation_context)
     return f"""
 Adjust one dish inside a household weekly plan.
 
@@ -556,6 +575,48 @@ Requirements:
 Required JSON shape:
 {{
   "policy_note": "string or null"
+}}
+""".strip()
+
+
+def _build_feedback_comment_prompt(
+    *,
+    item_view: StoredPlanItemView,
+    generation_context: WeeklyPlanGenerationContext,
+    household_member_name: str,
+    verdict: DishFeedbackVerdict,
+    raw_comment: str,
+) -> str:
+    return f"""
+Normalize one post-meal feedback comment for future meal planning.
+
+Dish:
+- name: {item_view.name}
+- summary: {item_view.summary or "нет"}
+- slot: {item_view.slot}
+
+Household member:
+- name: {household_member_name}
+
+Household context:
+{_render_household_members(generation_context)}
+
+Raw feedback:
+- verdict: {verdict.value}
+- comment: {raw_comment}
+
+Requirements:
+- planning_note should be a short Russian memory for future planning.
+- restriction_candidate should be set only if the comment clearly suggests
+  a broader recurring preference or restriction, not just a one-off critique.
+- Do not invent medical or religious restrictions.
+- If the comment is only about this exact dish, restriction_candidate must be null.
+- If the comment is too vague, planning_note may be null.
+
+Required JSON shape:
+{{
+  "planning_note": "string or null",
+  "restriction_candidate": "string or null"
 }}
 """.strip()
 
@@ -735,6 +796,29 @@ def _parse_policy_reason_payload(raw_content: str) -> str | None:
     return normalized_note or None
 
 
+def _parse_feedback_comment_payload(raw_content: str) -> dict[str, object]:
+    try:
+        payload = json.loads(raw_content)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"AI returned invalid JSON for feedback comment: {err}") from err
+
+    try:
+        parsed = _FeedbackCommentModel.model_validate(payload)
+    except ValidationError as err:
+        raise ValueError(f"AI feedback comment payload failed schema validation: {err}") from err
+
+    normalized_notes: dict[str, object] = {}
+    if parsed.planning_note is not None:
+        planning_note = parsed.planning_note.strip()
+        if planning_note:
+            normalized_notes["planning_note"] = planning_note
+    if parsed.restriction_candidate is not None:
+        restriction_candidate = parsed.restriction_candidate.strip()
+        if restriction_candidate:
+            normalized_notes["restriction_candidate"] = restriction_candidate
+    return normalized_notes
+
+
 def _iter_dates(start_date: date, end_date: date) -> list[date]:
     current_date = start_date
     dates: list[date] = []
@@ -754,7 +838,8 @@ def _render_household_members(context: WeeklyPlanGenerationContext) -> str:
             (
                 f"- {member.display_name}: ограничения={_render_list(member.constraints)}, "
                 f"любит={_render_list(member.favorite_cuisines)}, "
-                f"заметка={member.profile_note or 'нет'}"
+                f"заметка={member.profile_note or 'нет'}, "
+                f"feedback={_render_list(member.feedback_notes)}"
             )
             for member in context.members
         ],

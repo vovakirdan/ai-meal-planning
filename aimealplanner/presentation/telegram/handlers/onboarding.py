@@ -82,7 +82,10 @@ def build_onboarding_router(
     async def handle_cancel(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
-            "Текущий сценарий остановлен. Чтобы начать заново, отправь /start или /plan.",
+            (
+                "Текущий сценарий остановлен.\n"
+                "Чтобы продолжить, отправь /start, /plan, /week или /review."
+            ),
             reply_markup=remove_keyboard(),
         )
 

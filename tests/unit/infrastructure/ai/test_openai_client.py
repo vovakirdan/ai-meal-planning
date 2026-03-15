@@ -12,6 +12,7 @@ from aimealplanner.application.planning.generation_dto import (
 )
 from aimealplanner.infrastructure.ai.openai_client import (
     _parse_adjustment_payload,
+    _parse_feedback_comment_payload,
     _parse_replacement_payload,
     _parse_week_plan_payload,
 )
@@ -246,3 +247,32 @@ def test_parse_adjustment_payload_accepts_single_adjusted_dish() -> None:
         DishQuickAction(label="Легче", instruction="Сделай блюдо легче."),
         DishQuickAction(label="Мягче вкус", instruction="Сделай вкус мягче."),
     ]
+
+
+def test_parse_feedback_comment_payload_extracts_only_non_empty_fields() -> None:
+    raw_content = json.dumps(
+        {
+            "planning_note": "Сделать блюдо менее жирным.",
+            "restriction_candidate": "избегать слишком жирных сливочных блюд",
+        },
+    )
+
+    parsed = _parse_feedback_comment_payload(raw_content)
+
+    assert parsed == {
+        "planning_note": "Сделать блюдо менее жирным.",
+        "restriction_candidate": "избегать слишком жирных сливочных блюд",
+    }
+
+
+def test_parse_feedback_comment_payload_allows_empty_result() -> None:
+    raw_content = json.dumps(
+        {
+            "planning_note": "   ",
+            "restriction_candidate": None,
+        },
+    )
+
+    parsed = _parse_feedback_comment_payload(raw_content)
+
+    assert parsed == {}

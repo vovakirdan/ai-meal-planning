@@ -25,6 +25,7 @@ from aimealplanner.application.planning.dto import (
     PlanDraftResult,
     StoredDraftPlan,
     StoredPlanningHousehold,
+    StoredPlanningMember,
     StoredPlanningUser,
     StoredPlanReference,
 )
@@ -51,7 +52,10 @@ from aimealplanner.infrastructure.db.models.dish import (
     DishRecipeRecord,
     DishRecord,
 )
-from aimealplanner.infrastructure.db.models.feedback import HouseholdDishPolicyRecord
+from aimealplanner.infrastructure.db.models.feedback import (
+    DishFeedbackEventRecord,
+    HouseholdDishPolicyRecord,
+)
 from aimealplanner.infrastructure.db.models.household import (
     HouseholdMemberRecord,
     HouseholdRecord,
@@ -115,6 +119,27 @@ class SqlAlchemyPlanningHouseholdRepository:
             repeatability_mode=household.repeatability_mode,
             pantry_items_count=pantry_items_count or 0,
         )
+
+    async def list_members(self, household_id: UUID) -> list[StoredPlanningMember]:
+        statement = (
+            select(HouseholdMemberRecord)
+            .where(HouseholdMemberRecord.household_id == household_id)
+            .order_by(
+                HouseholdMemberRecord.sort_order.asc(),
+                HouseholdMemberRecord.created_at.asc(),
+            )
+        )
+        members = list(await self._session.scalars(statement))
+        return [
+            StoredPlanningMember(
+                id=member.id,
+                household_id=member.household_id,
+                display_name=member.display_name,
+                sort_order=member.sort_order,
+                is_active=member.is_active,
+            )
+            for member in members
+        ]
 
 
 class SqlAlchemyWeeklyPlanRepository:
@@ -535,6 +560,64 @@ class SqlAlchemyWeeklyPlanRepository:
             confirmed_at=confirmed_at,
         )
 
+    async def upsert_feedback_event(
+        self,
+        household_id: UUID,
+        household_member_id: UUID,
+        planned_meal_item_id: UUID,
+        dish_id: UUID,
+        feedback_date: date,
+        verdict: DishFeedbackVerdict,
+        raw_comment: str | None,
+        normalized_notes: dict[str, object],
+    ) -> None:
+        member_statement = select(HouseholdMemberRecord.id).where(
+            HouseholdMemberRecord.id == household_member_id,
+            HouseholdMemberRecord.household_id == household_id,
+            HouseholdMemberRecord.is_active.is_(True),
+        )
+        member_id = await self._session.scalar(member_statement)
+        if member_id is None:
+            raise ValueError("Не удалось найти выбранного участника семьи.")
+
+        item_statement = (
+            select(PlannedMealItemRecord)
+            .options(
+                selectinload(PlannedMealItemRecord.planned_meal).selectinload(
+                    PlannedMealRecord.weekly_plan,
+                ),
+            )
+            .where(PlannedMealItemRecord.id == planned_meal_item_id)
+        )
+        item = await self._session.scalar(item_statement)
+        if item is None or item.planned_meal.weekly_plan.household_id != household_id:
+            raise ValueError("Не удалось найти выбранное блюдо для отзыва.")
+
+        event_statement = select(DishFeedbackEventRecord).where(
+            DishFeedbackEventRecord.household_member_id == household_member_id,
+            DishFeedbackEventRecord.planned_meal_item_id == planned_meal_item_id,
+            DishFeedbackEventRecord.feedback_date == feedback_date,
+        )
+        event = await self._session.scalar(event_statement)
+        if event is None:
+            self._session.add(
+                DishFeedbackEventRecord(
+                    household_member_id=household_member_id,
+                    dish_id=dish_id,
+                    planned_meal_item_id=planned_meal_item_id,
+                    feedback_date=feedback_date,
+                    verdict=verdict,
+                    raw_comment=raw_comment,
+                    normalized_notes=normalized_notes,
+                ),
+            )
+        else:
+            event.dish_id = dish_id
+            event.verdict = verdict
+            event.raw_comment = raw_comment
+            event.normalized_notes = normalized_notes
+        await self._session.flush()
+
     async def get_generation_context(
         self,
         weekly_plan_id: UUID,
@@ -564,6 +647,20 @@ class SqlAlchemyWeeklyPlanRepository:
             .order_by(IngredientRecord.canonical_name.asc())
         )
         pantry_rows = list((await self._session.execute(pantry_statement)).all())
+        feedback_statement = (
+            select(DishFeedbackEventRecord, HouseholdMemberRecord, DishRecord)
+            .join(
+                HouseholdMemberRecord,
+                DishFeedbackEventRecord.household_member_id == HouseholdMemberRecord.id,
+            )
+            .join(DishRecord, DishFeedbackEventRecord.dish_id == DishRecord.id)
+            .where(HouseholdMemberRecord.household_id == household.id)
+            .order_by(
+                DishFeedbackEventRecord.feedback_date.desc(),
+                DishFeedbackEventRecord.created_at.desc(),
+            )
+        )
+        feedback_rows = list((await self._session.execute(feedback_statement)).all())
         policy_statement = (
             select(HouseholdDishPolicyRecord, DishRecord)
             .join(DishRecord, HouseholdDishPolicyRecord.dish_id == DishRecord.id)
@@ -571,6 +668,18 @@ class SqlAlchemyWeeklyPlanRepository:
             .order_by(HouseholdDishPolicyRecord.created_at.desc())
         )
         policy_rows = list((await self._session.execute(policy_statement)).all())
+        feedback_notes_by_member_id: dict[UUID, list[str]] = {}
+        for feedback_event, member, dish in feedback_rows:
+            member_notes = feedback_notes_by_member_id.setdefault(member.id, [])
+            if len(member_notes) >= 5:
+                continue
+            memory_entry = _build_feedback_memory_entry(
+                dish_name=dish.canonical_name,
+                feedback_event=feedback_event,
+            )
+            if memory_entry is None:
+                continue
+            member_notes.append(memory_entry)
 
         return WeeklyPlanGenerationContext(
             weekly_plan_id=weekly_plan.id,
@@ -592,6 +701,7 @@ class SqlAlchemyWeeklyPlanRepository:
                     constraints=list(member.constraints),
                     favorite_cuisines=list(member.favorite_cuisines),
                     profile_note=member.profile_note,
+                    feedback_notes=feedback_notes_by_member_id.get(member.id, []),
                 )
                 for member in members
             ],
@@ -858,3 +968,38 @@ def _coerce_optional_int(value: Any) -> int | None:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return None
+
+
+def _build_feedback_memory_entry(
+    *,
+    dish_name: str,
+    feedback_event: DishFeedbackEventRecord,
+) -> str | None:
+    planning_note = feedback_event.normalized_notes.get("planning_note")
+    if isinstance(planning_note, str) and planning_note.strip():
+        note_text = planning_note.strip()
+    elif isinstance(feedback_event.raw_comment, str) and feedback_event.raw_comment.strip():
+        note_text = feedback_event.raw_comment.strip()
+    else:
+        note_text = _render_feedback_verdict_hint(feedback_event.verdict)
+
+    if not note_text:
+        return None
+
+    restriction_candidate = feedback_event.normalized_notes.get("restriction_candidate")
+    if isinstance(restriction_candidate, str) and restriction_candidate.strip():
+        return (
+            f"{dish_name}: {note_text}. Возможное новое ограничение: "
+            f"{restriction_candidate.strip()}."
+        )
+    return f"{dish_name}: {note_text}."
+
+
+def _render_feedback_verdict_hint(verdict: DishFeedbackVerdict) -> str:
+    labels = {
+        DishFeedbackVerdict.FAVORITE: "очень понравилось",
+        DishFeedbackVerdict.CAN_REPEAT: "можно повторять",
+        DishFeedbackVerdict.RARELY_REPEAT: "лучше повторять редко",
+        DishFeedbackVerdict.NEVER_AGAIN: "лучше больше не повторять",
+    }
+    return labels.get(verdict, verdict.value)

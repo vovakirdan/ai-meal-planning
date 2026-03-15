@@ -8,6 +8,16 @@ from aimealplanner.application.planning.dto import (
     PlanDraftResult,
     PlanningStartContext,
 )
+from aimealplanner.application.planning.feedback_dto import (
+    ReviewDayOption,
+    ReviewDaySession,
+    ReviewQueueEntry,
+    ReviewStartContext,
+)
+from aimealplanner.application.planning.feedback_service import (
+    DishReviewService,
+    FeedbackSaveResult,
+)
 from aimealplanner.application.planning.generation_service import (
     GeneratedWeekPlanResult,
     WeeklyPlanGenerationService,
@@ -28,6 +38,8 @@ from aimealplanner.application.planning.service import PlanningService
 __all__ = [
     "DishPolicyService",
     "DishReplacementService",
+    "DishReviewService",
+    "FeedbackSaveResult",
     "GeneratedWeekPlanResult",
     "PlanConfirmationResult",
     "PlanDraftInput",
@@ -39,5 +51,9 @@ __all__ = [
     "RenderablePlanOverview",
     "ReplacementCandidate",
     "ReplacementSuggestionResult",
+    "ReviewDayOption",
+    "ReviewDaySession",
+    "ReviewQueueEntry",
+    "ReviewStartContext",
     "WeeklyPlanGenerationService",
 ]

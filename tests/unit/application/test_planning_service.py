@@ -18,6 +18,7 @@ from aimealplanner.application.planning.dto import (
     PlanDraftResult,
     StoredDraftPlan,
     StoredPlanningHousehold,
+    StoredPlanningMember,
     StoredPlanningUser,
     StoredPlanReference,
 )
@@ -73,9 +74,13 @@ class FakePlanningUserRepository:
 @dataclass
 class FakePlanningHouseholdRepository:
     households_by_user_id: dict[UUID, StoredPlanningHousehold] = field(default_factory=dict)
+    members_by_household_id: dict[UUID, list[StoredPlanningMember]] = field(default_factory=dict)
 
     async def get_by_user_id(self, user_id: UUID) -> StoredPlanningHousehold | None:
         return self.households_by_user_id.get(user_id)
+
+    async def list_members(self, household_id: UUID) -> list[StoredPlanningMember]:
+        return self.members_by_household_id.get(household_id, [])
 
 
 @dataclass
@@ -194,6 +199,29 @@ class FakeWeeklyPlanRepository:
         weekly_plan_id: UUID,
         generated_plan: GeneratedWeekPlan,
     ) -> None:
+        raise NotImplementedError
+
+    async def upsert_feedback_event(
+        self,
+        household_id: UUID,
+        household_member_id: UUID,
+        planned_meal_item_id: UUID,
+        dish_id: UUID,
+        feedback_date: date,
+        verdict: DishFeedbackVerdict,
+        raw_comment: str | None,
+        normalized_notes: dict[str, object],
+    ) -> None:
+        _ = (
+            household_id,
+            household_member_id,
+            planned_meal_item_id,
+            dish_id,
+            feedback_date,
+            verdict,
+            raw_comment,
+            normalized_notes,
+        )
         raise NotImplementedError
 
 

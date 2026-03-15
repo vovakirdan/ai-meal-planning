@@ -20,6 +20,7 @@ from aimealplanner.application.planning.dto import (
     PlanDraftResult,
     StoredDraftPlan,
     StoredPlanningHousehold,
+    StoredPlanningMember,
     StoredPlanningUser,
     StoredPlanReference,
 )
@@ -39,6 +40,8 @@ class PlanningUserRepository(Protocol):
 
 class PlanningHouseholdRepository(Protocol):
     async def get_by_user_id(self, user_id: UUID) -> StoredPlanningHousehold | None: ...
+
+    async def list_members(self, household_id: UUID) -> list[StoredPlanningMember]: ...
 
 
 class WeeklyPlanRepository(Protocol):
@@ -129,6 +132,18 @@ class WeeklyPlanRepository(Protocol):
         weekly_plan_id: UUID,
         confirmed_at: datetime,
     ) -> PlanConfirmationResult: ...
+
+    async def upsert_feedback_event(
+        self,
+        household_id: UUID,
+        household_member_id: UUID,
+        planned_meal_item_id: UUID,
+        dish_id: UUID,
+        feedback_date: date,
+        verdict: DishFeedbackVerdict,
+        raw_comment: str | None,
+        normalized_notes: dict[str, object],
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)

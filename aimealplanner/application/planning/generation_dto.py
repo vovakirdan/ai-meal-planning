@@ -19,6 +19,7 @@ class PlanningMemberContext:
     constraints: list[str]
     favorite_cuisines: list[str]
     profile_note: str | None
+    feedback_notes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
