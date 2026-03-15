@@ -20,6 +20,7 @@ from aimealplanner.application.onboarding import (
 from aimealplanner.infrastructure.db.enums import PantryStockLevel, RepeatabilityMode
 from aimealplanner.infrastructure.db.repositories import build_onboarding_repositories
 from aimealplanner.presentation.telegram.keyboards.onboarding import (
+    CANCEL_LABEL,
     NO_LABEL,
     PANTRY_STOCK_LABELS,
     REPEATABILITY_LABELS,
@@ -58,11 +59,7 @@ def build_onboarding_router(
         result = await service.start_onboarding(telegram_user_id)
         if result.already_completed:
             await message.answer(
-                (
-                    "Онбординг уже завершен.\n"
-                    "Данные household сохранены. Следующим слоем подключим "
-                    "составление плана на неделю."
-                ),
+                ("Профиль уже настроен.\nПозже здесь появятся план недели и настройки."),
                 reply_markup=remove_keyboard(),
             )
             return
@@ -71,13 +68,14 @@ def build_onboarding_router(
         await message.answer(
             (
                 "Привет! Начнем онбординг.\n"
-                "Я задам несколько коротких вопросов про household, "
-                "участников, напоминания и pantry."
+                "Я задам несколько коротких вопросов про состав семьи, "
+                "предпочтения, напоминания и запасы."
             ),
             reply_markup=build_household_size_keyboard(),
         )
         await message.answer(
-            "Сколько человек в household? Выбери число кнопкой или напиши его сообщением.",
+            "Сколько человек нужно учитывать в меню? "
+            "Выбери число кнопкой или напиши его сообщением.",
         )
 
     @router.message(Command("cancel"))
@@ -98,7 +96,7 @@ def build_onboarding_router(
             return
 
         if household_size not in range(1, 11):
-            await message.answer("Для MVP давай ограничимся household размером от 1 до 10 человек.")
+            await message.answer("Для MVP давай ограничимся составом от 1 до 10 человек.")
             return
 
         await state.update_data(household_size=household_size, member_index=0, member_names=[])
@@ -139,7 +137,7 @@ def build_onboarding_router(
         await state.update_data(desserts_enabled=desserts_enabled)
         await state.set_state(OnboardingStates.repeatability_mode)
         await message.answer(
-            "Какой режим повторяемости нужен? Можно пропустить, тогда будет balanced.",
+            "Какой режим повторяемости нужен? Можно пропустить, тогда будет сбалансированно.",
             reply_markup=build_repeatability_keyboard(),
         )
 
@@ -166,10 +164,13 @@ def build_onboarding_router(
             ),
         )
         await state.set_state(OnboardingStates.member_name)
-        await message.answer(
-            "Теперь пройдемся по участникам household.\nКак зовут первого участника?",
-            reply_markup=remove_keyboard(),
+        household_size = cast(int, state_data["household_size"])
+        member_intro = (
+            "Теперь немного о тебе.\nКак тебя зовут?"
+            if household_size == 1
+            else "Теперь коротко про каждого участника.\nКак зовут первого участника?"
         )
+        await message.answer(member_intro, reply_markup=remove_keyboard())
 
     @router.message(OnboardingStates.member_name)
     async def handle_member_name(message: Message, state: FSMContext) -> None:
@@ -185,7 +186,7 @@ def build_onboarding_router(
         await state.set_state(OnboardingStates.member_constraints)
         await message.answer(
             (
-                f"Что точно нельзя или нежелательно для {display_name}?\n"
+                f"Что точно нельзя или нежелательно для участника {display_name}?\n"
                 "Можно перечислить через запятую или с новой строки. "
                 "Если ничего особенного нет, нажми Пропустить."
             ),
@@ -258,10 +259,10 @@ def build_onboarding_router(
 
         await state.set_state(OnboardingStates.daily_reminder_enabled)
         await message.answer(
-            "Во сколько присылать ежедневное напоминание оценить блюда?",
+            "Нужно ли присылать ежедневное напоминание оценить блюда?",
             reply_markup=build_yes_no_keyboard(),
         )
-        await message.answer("Если ежедневный reminder не нужен, выбери Нет.")
+        await message.answer("Если ежедневное напоминание не нужно, выбери Нет.")
 
     @router.message(OnboardingStates.daily_reminder_enabled)
     async def handle_daily_reminder_enabled(message: Message, state: FSMContext) -> None:
@@ -323,7 +324,7 @@ def build_onboarding_router(
             )
             await state.set_state(OnboardingStates.pantry_choice)
             await message.answer(
-                "Хочешь сразу заполнить pantry?",
+                "Хочешь сразу отметить, что уже есть дома?",
                 reply_markup=build_yes_no_keyboard(),
             )
             return
@@ -369,7 +370,7 @@ def build_onboarding_router(
         )
         await state.set_state(OnboardingStates.pantry_choice)
         await message.answer(
-            "Хочешь сразу заполнить pantry?",
+            "Хочешь сразу отметить, что уже есть дома?",
             reply_markup=build_yes_no_keyboard(),
         )
 
@@ -388,7 +389,7 @@ def build_onboarding_router(
         await state.set_state(OnboardingStates.pantry_item_name)
         await message.answer(
             (
-                "Напиши первый продукт для pantry.\n"
+                "Напиши первый продукт, который уже есть дома.\n"
                 "Например: томаты в собственном соку, рис, пармезан."
             ),
             reply_markup=remove_keyboard(),
@@ -415,8 +416,16 @@ def build_onboarding_router(
     @router.message(OnboardingStates.pantry_stock_level)
     async def handle_pantry_stock_level(message: Message, state: FSMContext) -> None:
         text = _require_text(message)
+        if text == CANCEL_LABEL:
+            await state.set_state(OnboardingStates.pantry_item_name)
+            await message.answer(
+                "Хорошо, не добавляю этот продукт. Пришли следующий продукт.",
+                reply_markup=remove_keyboard(),
+            )
+            return
+
         if text not in PANTRY_STOCK_LABELS:
-            await message.answer("Выбери один из вариантов: Есть, Мало, Нет.")
+            await message.answer("Выбери один из вариантов: Есть, Мало, Отмена.")
             return
 
         await state.update_data(pantry_stock_level=PANTRY_STOCK_LABELS[text])
@@ -458,7 +467,7 @@ def build_onboarding_router(
         )
         await state.set_state(OnboardingStates.pantry_continue)
         await message.answer(
-            "Добавить еще один продукт в pantry?",
+            "Добавить еще один продукт в запасы?",
             reply_markup=build_pantry_continue_keyboard(),
         )
 
@@ -473,7 +482,7 @@ def build_onboarding_router(
         if wants_more:
             await state.set_state(OnboardingStates.pantry_item_name)
             await message.answer(
-                "Хорошо, пришли следующий продукт для pantry.",
+                "Хорошо, пришли следующий продукт.",
                 reply_markup=remove_keyboard(),
             )
             return
@@ -495,9 +504,9 @@ async def _finish_onboarding(
     await message.answer(
         (
             "Онбординг завершен.\n"
-            "Сохранил household с участниками: "
+            "Сохранил состав семьи: "
             f"{', '.join(member_names) if member_names else 'без участников'}.\n"
-            "Следующим слоем подключим составление плана на неделю."
+            "Дальше здесь появится составление плана на неделю."
         ),
         reply_markup=remove_keyboard(),
     )

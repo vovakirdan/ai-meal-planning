@@ -5,6 +5,7 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemo
 YES_LABEL = "Да"
 NO_LABEL = "Нет"
 SKIP_LABEL = "Пропустить"
+CANCEL_LABEL = "Отмена"
 
 REPEATABILITY_LABELS = {
     "Сбалансировано": "balanced",
@@ -15,7 +16,6 @@ REPEATABILITY_LABELS = {
 PANTRY_STOCK_LABELS = {
     "Есть": "has",
     "Мало": "low",
-    "Нет": "none",
 }
 
 DAY_OF_WEEK_LABELS = [
@@ -74,7 +74,7 @@ def build_day_of_week_keyboard() -> ReplyKeyboardMarkup:
 
 
 def build_pantry_stock_keyboard() -> ReplyKeyboardMarkup:
-    return _keyboard([list(PANTRY_STOCK_LABELS)])
+    return _keyboard([["Есть", "Мало", CANCEL_LABEL]])
 
 
 def build_pantry_continue_keyboard() -> ReplyKeyboardMarkup:
