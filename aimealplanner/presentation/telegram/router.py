@@ -1,6 +1,7 @@
 from aiogram import Router
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aimealplanner.application.analytics import AnalyticsTracker
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
 from aimealplanner.presentation.telegram.handlers.help import (
@@ -34,16 +35,18 @@ def build_router(
     weekly_plan_generator: OpenAIWeeklyPlanGenerator,
     *,
     recipe_hint_provider: SpoonacularRecipeHintProvider | None,
+    analytics: AnalyticsTracker,
 ) -> Router:
     router = Router(name="root")
-    router.include_router(build_help_router())
-    router.include_router(build_onboarding_router(session_factory))
-    router.include_router(build_settings_router(session_factory))
+    router.include_router(build_help_router(analytics=analytics))
+    router.include_router(build_onboarding_router(session_factory, analytics=analytics))
+    router.include_router(build_settings_router(session_factory, analytics=analytics))
     router.include_router(
         build_planning_router(
             session_factory,
             weekly_plan_generator,
             recipe_hint_provider=recipe_hint_provider,
+            analytics=analytics,
         ),
     )
     router.include_router(
@@ -51,6 +54,7 @@ def build_router(
             session_factory,
             weekly_plan_generator=weekly_plan_generator,
             recipe_hint_provider=recipe_hint_provider,
+            analytics=analytics,
         ),
     )
     router.include_router(
@@ -58,12 +62,14 @@ def build_router(
             session_factory,
             weekly_plan_generator=weekly_plan_generator,
             recipe_hint_provider=recipe_hint_provider,
+            analytics=analytics,
         ),
     )
     router.include_router(
         build_review_router(
             session_factory,
             weekly_plan_generator=weekly_plan_generator,
+            analytics=analytics,
         ),
     )
     router.include_router(
@@ -71,6 +77,7 @@ def build_router(
             session_factory,
             weekly_plan_generator=weekly_plan_generator,
             recipe_hint_provider=recipe_hint_provider,
+            analytics=analytics,
         ),
     )
     return router

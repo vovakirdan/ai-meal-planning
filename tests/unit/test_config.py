@@ -14,6 +14,8 @@ def clear_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AI_BASE_URL",
         "SPOONACULAR_API_KEY",
         "SPOONACULAR_BASE_URL",
+        "POSTHOG_API_KEY",
+        "POSTHOG_HOST",
         "APP_ENV",
         "LOG_LEVEL",
     ):
@@ -37,6 +39,8 @@ def test_settings_load_defaults_from_env(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.ai_base_url == "https://example.test/v1"
     assert settings.spoonacular_api_key is None
     assert settings.spoonacular_base_url == "https://api.spoonacular.com"
+    assert settings.posthog_api_key is None
+    assert settings.posthog_host == "https://eu.posthog.com"
 
 
 def test_settings_reject_placeholder_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:

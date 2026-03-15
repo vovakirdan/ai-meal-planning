@@ -17,6 +17,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aimealplanner.application.analytics import AnalyticsTracker
 from aimealplanner.application.planning import (
     DishPolicyService,
     DishReplacementService,
@@ -37,6 +38,11 @@ from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict, WeeklyPlanStatus
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
+from aimealplanner.presentation.telegram.analytics import (
+    track_callback_event,
+    track_command,
+    track_message_event,
+)
 from aimealplanner.presentation.telegram.keyboards.onboarding import CANCEL_LABEL, remove_keyboard
 from aimealplanner.presentation.telegram.keyboards.planning import (
     REJECT_DISH_REASON_LABEL,
@@ -72,6 +78,7 @@ def build_plan_browser_router(
     *,
     weekly_plan_generator: OpenAIWeeklyPlanGenerator,
     recipe_hint_provider: SpoonacularRecipeHintProvider | None,
+    analytics: AnalyticsTracker,
 ) -> Router:
     router = Router(name="plan_browser")
     browsing_service = PlanningBrowsingService(session_factory, build_planning_repositories)
@@ -102,6 +109,7 @@ def build_plan_browser_router(
 
     @router.message(Command("week"))
     async def handle_week_command(message: Message) -> None:
+        track_command(analytics, message=message, command="week")
         try:
             overview = await browsing_service.get_latest_overview(
                 _require_telegram_user_id_from_message(message),
@@ -110,6 +118,12 @@ def build_plan_browser_router(
             await message.answer(str(err), reply_markup=remove_keyboard())
             return
 
+        track_message_event(
+            analytics,
+            message=message,
+            event="week_viewed",
+            properties={"plan_status": overview.status.value},
+        )
         await message.answer(
             overview.text,
             reply_markup=build_plan_days_keyboard(
@@ -186,6 +200,12 @@ def build_plan_browser_router(
                 allow_confirm=overview.status == WeeklyPlanStatus.DRAFT,
             ),
             answer_callback=False,
+        )
+        track_callback_event(
+            analytics,
+            callback=callback,
+            event="week_confirmed",
+            properties={"weekly_plan_id": overview.weekly_plan_id.hex},
         )
         await callback.answer("План на неделю подтвержден.")
         warmup_task = asyncio.create_task(

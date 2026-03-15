@@ -14,6 +14,7 @@ from aiogram.fsm.state import State
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aimealplanner.application.analytics import AnalyticsTracker
 from aimealplanner.application.onboarding import PantryItemInput
 from aimealplanner.application.settings import (
     FamilySettingsView,
@@ -33,6 +34,7 @@ from aimealplanner.infrastructure.db.enums import (
     RepeatabilityMode,
 )
 from aimealplanner.infrastructure.db.repositories import build_settings_repository
+from aimealplanner.presentation.telegram.analytics import track_command, track_message_event
 from aimealplanner.presentation.telegram.keyboards.onboarding import SKIP_LABEL
 from aimealplanner.presentation.telegram.keyboards.settings import (
     CLEAR_LABEL,
@@ -91,12 +93,15 @@ _PANTRY_PAGE_SIZE = 8
 
 def build_settings_router(
     session_factory: async_sessionmaker[AsyncSession],
+    *,
+    analytics: AnalyticsTracker,
 ) -> Router:
     router = Router(name="settings")
     service = SettingsService(session_factory, build_settings_repository)
 
     @router.message(Command("settings"))
     async def handle_settings_command(message: Message, state: FSMContext) -> None:
+        track_command(analytics, message=message, command="settings")
         await state.clear()
         try:
             home_view = await service.get_home(_require_telegram_user_id_from_message(message))
@@ -104,6 +109,7 @@ def build_settings_router(
             await message.answer(str(err))
             return
 
+        track_message_event(analytics, message=message, event="settings_opened")
         settings_message = await message.answer(
             _render_home(home_view),
             reply_markup=build_settings_home_keyboard(),

@@ -10,12 +10,14 @@ from aiogram.fsm.storage.redis import RedisStorage
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from aimealplanner.application.analytics import AnalyticsTracker
 from aimealplanner.application.planning.feedback_service import DishReviewService
 from aimealplanner.application.planning.service import PlanningService
 from aimealplanner.application.reminders import ReminderScheduler, ReminderService
 from aimealplanner.core.config import Settings
 from aimealplanner.core.logging import configure_logging
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
+from aimealplanner.infrastructure.analytics import build_analytics_tracker
 from aimealplanner.infrastructure.db.initialization import verify_database_connection
 from aimealplanner.infrastructure.db.repositories import (
     build_planning_repositories,
@@ -40,6 +42,7 @@ class AppRuntime:
     redis: Redis
     weekly_plan_generator: OpenAIWeeklyPlanGenerator
     recipe_hint_provider: SpoonacularRecipeHintProvider | None
+    analytics: AnalyticsTracker
     reminder_scheduler: ReminderScheduler
 
 
@@ -52,6 +55,7 @@ def build_runtime(settings: Settings | None = None) -> AppRuntime:
     redis = build_redis(resolved_settings.redis_url)
     weekly_plan_generator = OpenAIWeeklyPlanGenerator.from_settings(resolved_settings)
     recipe_hint_provider = SpoonacularRecipeHintProvider.from_settings(resolved_settings)
+    analytics = build_analytics_tracker(resolved_settings)
     bot = Bot(token=resolved_settings.bot_token)
     dispatcher = Dispatcher(storage=RedisStorage(redis=redis))
     dispatcher.include_router(
@@ -59,6 +63,7 @@ def build_runtime(settings: Settings | None = None) -> AppRuntime:
             session_factory,
             weekly_plan_generator,
             recipe_hint_provider=recipe_hint_provider,
+            analytics=analytics,
         ),
     )
     reminder_service = ReminderService(
@@ -78,6 +83,7 @@ def build_runtime(settings: Settings | None = None) -> AppRuntime:
         bot=bot,
         redis=redis,
         reminder_service=reminder_service,
+        analytics=analytics,
     )
 
     return AppRuntime(
@@ -89,6 +95,7 @@ def build_runtime(settings: Settings | None = None) -> AppRuntime:
         redis=redis,
         weekly_plan_generator=weekly_plan_generator,
         recipe_hint_provider=recipe_hint_provider,
+        analytics=analytics,
         reminder_scheduler=reminder_scheduler,
     )
 
@@ -112,5 +119,6 @@ async def run() -> None:
         await runtime.redis.aclose()
         if runtime.recipe_hint_provider is not None:
             await runtime.recipe_hint_provider.close()
+        await runtime.analytics.aclose()
         await runtime.weekly_plan_generator.close()
         await runtime.engine.dispose()

@@ -14,6 +14,7 @@ _DEFAULT_DATABASE_URL = (
 )
 _DEFAULT_REDIS_URL = "redis://redis:6379/0"
 _DEFAULT_SPOONACULAR_BASE_URL = "https://api.spoonacular.com"
+_DEFAULT_POSTHOG_HOST = "https://eu.posthog.com"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,8 @@ class Settings:
     ai_base_url: str
     spoonacular_api_key: str | None
     spoonacular_base_url: str
+    posthog_api_key: str | None
+    posthog_host: str
     app_env: AppEnv
     log_level: str
 
@@ -53,6 +56,7 @@ class Settings:
             raise ValueError("AI_BASE_URL is required")
 
         spoonacular_api_key = os.getenv("SPOONACULAR_API_KEY", "").strip() or None
+        posthog_api_key = os.getenv("POSTHOG_API_KEY", "").strip() or None
 
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
         if log_level not in _ALLOWED_LOG_LEVELS:
@@ -78,6 +82,8 @@ class Settings:
                 "SPOONACULAR_BASE_URL",
                 _DEFAULT_SPOONACULAR_BASE_URL,
             ),
+            posthog_api_key=posthog_api_key,
+            posthog_host=os.getenv("POSTHOG_HOST", _DEFAULT_POSTHOG_HOST),
             app_env=cast(AppEnv, app_env),
             log_level=log_level,
         )

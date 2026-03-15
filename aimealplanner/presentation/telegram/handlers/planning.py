@@ -13,6 +13,7 @@ from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aimealplanner.application.analytics import AnalyticsTracker
 from aimealplanner.application.planning import (
     PlanDraftInput,
     PlanningService,
@@ -22,6 +23,11 @@ from aimealplanner.application.planning import (
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
+from aimealplanner.presentation.telegram.analytics import (
+    track_command,
+    track_message_event,
+    track_telegram_user_event,
+)
 from aimealplanner.presentation.telegram.keyboards.onboarding import (
     NO_LABEL,
     SKIP_LABEL,
@@ -52,6 +58,7 @@ def build_planning_router(
     weekly_plan_generator: OpenAIWeeklyPlanGenerator,
     *,
     recipe_hint_provider: SpoonacularRecipeHintProvider | None,
+    analytics: AnalyticsTracker,
 ) -> Router:
     router = Router(name="planning")
     service = PlanningService(session_factory, build_planning_repositories)
@@ -64,6 +71,7 @@ def build_planning_router(
 
     @router.message(Command("plan"))
     async def handle_plan_start(message: Message, state: FSMContext) -> None:
+        track_command(analytics, message=message, command="plan")
         await state.clear()
         try:
             context = await service.start_planning(_require_telegram_user_id(message))
@@ -71,6 +79,12 @@ def build_planning_router(
             await message.answer(str(err), reply_markup=remove_keyboard())
             return
 
+        track_message_event(
+            analytics,
+            message=message,
+            event="planning_started",
+            properties={"has_existing_draft": context.existing_draft is not None},
+        )
         await _store_start_context(state, context)
         if context.existing_draft is not None:
             await state.set_state(PlanningStates.replace_existing_draft)
@@ -303,6 +317,7 @@ def build_planning_router(
                 state,
                 service,
                 generation_service,
+                analytics,
                 pantry_considered=False,
             )
             return
@@ -326,6 +341,7 @@ def build_planning_router(
             state,
             service,
             generation_service,
+            analytics,
             pantry_considered=pantry_considered,
         )
 
@@ -368,6 +384,7 @@ async def _create_plan_draft(
     state: FSMContext,
     service: PlanningService,
     generation_service: WeeklyPlanGenerationService,
+    analytics: AnalyticsTracker,
     *,
     pantry_considered: bool,
 ) -> None:
@@ -403,6 +420,20 @@ async def _create_plan_draft(
         await message.answer(str(err), reply_markup=remove_keyboard())
         return
 
+    track_message_event(
+        analytics,
+        message=message,
+        event="plan_draft_created",
+        properties={
+            "weekly_plan_id": draft.weekly_plan_id.hex,
+            "days_count": (draft.end_date - draft.start_date).days + 1,
+            "meal_count_per_day": meal_count_per_day,
+            "desserts_enabled": desserts_enabled,
+            "pantry_considered": pantry_considered,
+            "has_week_mood": week_mood is not None,
+            "has_weekly_notes": weekly_notes is not None,
+        },
+    )
     await state.clear()
     await message.answer(
         (
@@ -419,6 +450,8 @@ async def _create_plan_draft(
             message_thread_id=message.message_thread_id,
             generation_service=generation_service,
             weekly_plan_id=draft.weekly_plan_id,
+            telegram_user_id=_require_telegram_user_id(message),
+            analytics=analytics,
         ),
     )
     generation_task.add_done_callback(_report_background_task_result)
@@ -500,6 +533,8 @@ async def _generate_week_plan_and_send(
     message_thread_id: int | None,
     generation_service: WeeklyPlanGenerationService,
     weekly_plan_id: UUID,
+    telegram_user_id: int,
+    analytics: AnalyticsTracker,
 ) -> None:
     try:
         async with ChatActionSender.typing(
@@ -508,6 +543,17 @@ async def _generate_week_plan_and_send(
             message_thread_id=message_thread_id,
         ):
             result = await generation_service.generate_for_plan(weekly_plan_id)
+        track_telegram_user_event(
+            analytics,
+            telegram_user_id=telegram_user_id,
+            event="plan_generated",
+            properties={
+                "weekly_plan_id": result.weekly_plan_id.hex,
+                "days_count": (result.end_date - result.start_date).days + 1,
+                "meals_count": result.meals_count,
+                "items_count": result.items_count,
+            },
+        )
         await bot.send_message(
             chat_id=chat_id,
             text=result.rendered_message,
@@ -527,6 +573,12 @@ async def _generate_week_plan_and_send(
         )
     except Exception:
         logger.exception("weekly plan generation failed for draft %s", weekly_plan_id)
+        track_telegram_user_event(
+            analytics,
+            telegram_user_id=telegram_user_id,
+            event="plan_generation_failed",
+            properties={"weekly_plan_id": weekly_plan_id.hex},
+        )
         await bot.send_message(
             chat_id=chat_id,
             text=(

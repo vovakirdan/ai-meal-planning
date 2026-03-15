@@ -13,6 +13,7 @@ from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aimealplanner.application.analytics import AnalyticsTracker
 from aimealplanner.application.planning import (
     RecipeService,
     ShoppingListService,
@@ -21,6 +22,7 @@ from aimealplanner.application.planning import (
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
+from aimealplanner.presentation.telegram.analytics import track_command, track_message_event
 from aimealplanner.presentation.telegram.keyboards.onboarding import remove_keyboard
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ def build_shopping_router(
     *,
     weekly_plan_generator: OpenAIWeeklyPlanGenerator,
     recipe_hint_provider: SpoonacularRecipeHintProvider | None,
+    analytics: AnalyticsTracker,
 ) -> Router:
     router = Router(name="shopping")
     recipe_service = RecipeService(
@@ -56,6 +59,7 @@ def build_shopping_router(
 
     @router.message(Command("shopping"))
     async def handle_shopping_command(message: Message) -> None:
+        track_command(analytics, message=message, command="shopping")
         await message.answer(
             _SHOPPING_PROGRESS_TEXTS[0],
             reply_markup=remove_keyboard(),
@@ -82,6 +86,19 @@ def build_shopping_router(
                 return
 
         await _stop_progress_updates(heartbeat_task)
+        availability_counts = {
+            "need_to_buy_count": 0,
+            "partially_have_count": 0,
+            "already_have_count": 0,
+        }
+        for item in result.items:
+            availability_counts[f"{item.availability_status.value}_count"] += 1
+        track_message_event(
+            analytics,
+            message=message,
+            event="shopping_generated",
+            properties={"items_count": len(result.items), **availability_counts},
+        )
         for chunk in _split_shopping_message(render_shopping_list(result)):
             await message.answer(chunk)
 

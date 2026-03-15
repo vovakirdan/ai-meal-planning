@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aimealplanner.application.analytics import AnalyticsTracker
 from aimealplanner.application.planning import (
     DishReviewService,
     ReviewQueueEntry,
@@ -21,6 +22,10 @@ from aimealplanner.application.planning import (
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
+from aimealplanner.presentation.telegram.analytics import (
+    track_command,
+    track_message_event,
+)
 from aimealplanner.presentation.telegram.keyboards.onboarding import (
     CANCEL_LABEL,
     remove_keyboard,
@@ -41,6 +46,7 @@ def build_review_router(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     weekly_plan_generator: OpenAIWeeklyPlanGenerator,
+    analytics: AnalyticsTracker,
 ) -> Router:
     router = Router(name="review")
     review_service = DishReviewService(
@@ -51,6 +57,7 @@ def build_review_router(
 
     @router.message(Command("review"))
     async def handle_review_command(message: Message, state: FSMContext) -> None:
+        track_command(analytics, message=message, command="review")
         await state.clear()
         try:
             context = await review_service.start_review(
@@ -60,6 +67,12 @@ def build_review_router(
             await message.answer(str(err), reply_markup=remove_keyboard())
             return
 
+        track_message_event(
+            analytics,
+            message=message,
+            event="review_started",
+            properties={"days_available": len(context.days)},
+        )
         await message.answer(
             _render_review_start(context),
             reply_markup=build_review_days_keyboard(
@@ -156,6 +169,7 @@ def build_review_router(
             bot=_require_callback_bot(callback),
             state=state,
             review_service=review_service,
+            analytics=analytics,
             telegram_user_id=_require_telegram_user_id_from_callback(callback),
             entry=entry,
             verdict=verdict,
@@ -197,6 +211,7 @@ def build_review_router(
             bot=_require_callback_bot(callback),
             state=state,
             review_service=review_service,
+            analytics=analytics,
             telegram_user_id=_require_telegram_user_id_from_callback(callback),
             entry=entry,
             verdict=verdict,
@@ -244,6 +259,7 @@ def build_review_router(
                 bot=_require_message_bot(message),
                 state=state,
                 review_service=review_service,
+                analytics=analytics,
                 telegram_user_id=_require_telegram_user_id_from_message(message),
                 entry=entry,
                 verdict=verdict,
@@ -258,6 +274,7 @@ async def _save_feedback_and_advance(
     bot: Bot,
     state: FSMContext,
     review_service: DishReviewService,
+    analytics: AnalyticsTracker,
     telegram_user_id: int,
     entry: ReviewQueueEntry,
     verdict: DishFeedbackVerdict,
@@ -268,6 +285,15 @@ async def _save_feedback_and_advance(
         entry=entry,
         verdict=verdict,
         raw_comment=raw_comment,
+    )
+    analytics.capture(
+        telegram_user_id=telegram_user_id,
+        event="dish_review_submitted",
+        properties={
+            "verdict": verdict.value,
+            "has_comment": raw_comment is not None,
+            "slot": entry.slot,
+        },
     )
 
     state_data = await state.get_data()

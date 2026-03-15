@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aimealplanner.application.analytics import AnalyticsTracker
 from aimealplanner.application.onboarding import (
     DailyReminderInput,
     HouseholdMemberInput,
@@ -19,6 +20,7 @@ from aimealplanner.application.onboarding import (
 )
 from aimealplanner.infrastructure.db.enums import PantryStockLevel, RepeatabilityMode
 from aimealplanner.infrastructure.db.repositories import build_onboarding_repositories
+from aimealplanner.presentation.telegram.analytics import track_command, track_message_event
 from aimealplanner.presentation.telegram.keyboards.onboarding import (
     CANCEL_LABEL,
     NO_LABEL,
@@ -48,6 +50,8 @@ from aimealplanner.presentation.telegram.states.onboarding import OnboardingStat
 
 def build_onboarding_router(
     session_factory: async_sessionmaker[AsyncSession],
+    *,
+    analytics: AnalyticsTracker,
 ) -> Router:
     router = Router(name="onboarding")
     service = OnboardingService(session_factory, build_onboarding_repositories)
@@ -55,6 +59,7 @@ def build_onboarding_router(
     @router.message(CommandStart())
     async def handle_start(message: Message, state: FSMContext) -> None:
         telegram_user_id = _require_telegram_user_id(message)
+        track_command(analytics, message=message, command="start")
         await state.clear()
         result = await service.start_onboarding(telegram_user_id)
         if result.already_completed:
@@ -64,6 +69,7 @@ def build_onboarding_router(
             )
             return
 
+        track_message_event(analytics, message=message, event="onboarding_started")
         await state.set_state(OnboardingStates.household_size)
         await message.answer(
             (
@@ -386,7 +392,7 @@ def build_onboarding_router(
             return
 
         if not wants_pantry:
-            await _finish_onboarding(message, state, service)
+            await _finish_onboarding(message, state, service, analytics=analytics)
             return
 
         await state.set_state(OnboardingStates.pantry_item_name)
@@ -490,7 +496,7 @@ def build_onboarding_router(
             )
             return
 
-        await _finish_onboarding(message, state, service)
+        await _finish_onboarding(message, state, service, analytics=analytics)
 
     return router
 
@@ -499,10 +505,18 @@ async def _finish_onboarding(
     message: Message,
     state: FSMContext,
     service: OnboardingService,
+    *,
+    analytics: AnalyticsTracker,
 ) -> None:
     state_data = await state.get_data()
     await service.complete_onboarding(_require_telegram_user_id(message))
     member_names = cast(list[str], state_data.get("member_names", []))
+    track_message_event(
+        analytics,
+        message=message,
+        event="onboarding_completed",
+        properties={"members_count": len(member_names)},
+    )
     await state.clear()
     await message.answer(
         (

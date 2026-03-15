@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from aiogram.client.bot import Bot
 from redis.asyncio import Redis
 
+from aimealplanner.application.analytics import AnalyticsTracker
 from aimealplanner.application.reminders.service import ReminderService
 
 logger = logging.getLogger(__name__)
@@ -20,11 +21,13 @@ class ReminderScheduler:
         bot: Bot,
         redis: Redis,
         reminder_service: ReminderService,
+        analytics: AnalyticsTracker,
         interval_seconds: int = 30,
     ) -> None:
         self._bot = bot
         self._redis = redis
         self._reminder_service = reminder_service
+        self._analytics = analytics
         self._interval_seconds = interval_seconds
 
     async def run_forever(self) -> None:
@@ -52,6 +55,11 @@ class ReminderScheduler:
                 await self._bot.send_message(
                     dispatch.telegram_user_id,
                     dispatch.text,
+                )
+                self._analytics.capture(
+                    telegram_user_id=dispatch.telegram_user_id,
+                    event="reminder_sent",
+                    properties={"kind": dispatch.kind},
                 )
             except Exception:
                 await self._redis.delete(dispatch.dedupe_key)

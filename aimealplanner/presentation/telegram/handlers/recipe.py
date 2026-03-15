@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aimealplanner.application.analytics import AnalyticsTracker
 from aimealplanner.application.planning import (
     RecipeDayContext,
     RecipeItemResult,
@@ -24,6 +25,11 @@ from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.db.enums import WeeklyPlanStatus
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
+from aimealplanner.presentation.telegram.analytics import (
+    track_callback_event,
+    track_command,
+    track_message_event,
+)
 from aimealplanner.presentation.telegram.keyboards.onboarding import (
     CANCEL_LABEL,
     remove_keyboard,
@@ -49,6 +55,7 @@ def build_recipe_router(
     *,
     weekly_plan_generator: OpenAIWeeklyPlanGenerator,
     recipe_hint_provider: SpoonacularRecipeHintProvider | None,
+    analytics: AnalyticsTracker,
 ) -> Router:
     router = Router(name="recipe")
     recipe_service = RecipeService(
@@ -60,6 +67,7 @@ def build_recipe_router(
 
     @router.message(Command("recipe"))
     async def handle_recipe_command(message: Message) -> None:
+        track_command(analytics, message=message, command="recipe")
         await _handle_recipe_start_message(
             message,
             recipe_service=recipe_service,
@@ -68,6 +76,7 @@ def build_recipe_router(
 
     @router.message(Command("ingredients"))
     async def handle_ingredients_command(message: Message) -> None:
+        track_command(analytics, message=message, command="ingredients")
         await _handle_recipe_start_message(
             message,
             recipe_service=recipe_service,
@@ -188,6 +197,12 @@ def build_recipe_router(
             ),
             answer_callback=False,
         )
+        track_callback_event(
+            analytics,
+            callback=callback,
+            event="recipe_viewed" if mode == _RECIPE_MODE else "ingredients_viewed",
+            properties={"slot": item_result.item_view.slot},
+        )
 
     @router.callback_query(F.data.startswith("rpf:"))
     async def handle_recipe_feedback_callback(
@@ -286,6 +301,12 @@ def build_recipe_router(
                 meal_date=item_result.item_view.meal_date,
                 planned_meal_item_id=item_result.item_view.planned_meal_item_id,
             ),
+        )
+        track_message_event(
+            analytics,
+            message=message,
+            event="recipe_adjusted",
+            properties={"slot": item_result.item_view.slot},
         )
 
     return router

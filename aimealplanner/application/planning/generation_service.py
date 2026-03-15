@@ -21,6 +21,8 @@ class GeneratedWeekPlanResult:
     weekly_plan_id: UUID
     start_date: date
     end_date: date
+    meals_count: int
+    items_count: int
     rendered_message: str
 
 
@@ -61,6 +63,8 @@ class WeeklyPlanGenerationService:
                 weekly_plan_id=enriched_context.weekly_plan_id,
                 start_date=enriched_context.start_date,
                 end_date=enriched_context.end_date,
+                meals_count=len(generated_plan.meals),
+                items_count=sum(len(meal.items) for meal in generated_plan.meals),
                 rendered_message=render_generated_week_plan(enriched_context, generated_plan),
             )
 
