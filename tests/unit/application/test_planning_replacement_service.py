@@ -9,8 +9,10 @@ from uuid import UUID, uuid4
 import pytest
 from aimealplanner.application.planning.browsing_dto import StoredPlanItemView
 from aimealplanner.application.planning.dto import (
+    PlanConfirmationResult,
     StoredPlanningHousehold,
     StoredPlanningUser,
+    StoredPlanReference,
 )
 from aimealplanner.application.planning.generation_dto import (
     DishQuickAction,
@@ -87,6 +89,13 @@ class FakeWeeklyPlanRepository:
     policies_by_dish_id: dict[UUID, DishFeedbackVerdict] = field(default_factory=dict)
 
     async def get_latest_draft_for_household(self, household_id: UUID) -> None:
+        _ = household_id
+        raise NotImplementedError
+
+    async def get_latest_confirmed_for_household(
+        self,
+        household_id: UUID,
+    ) -> StoredPlanReference | None:
         _ = household_id
         raise NotImplementedError
 
@@ -205,6 +214,15 @@ class FakeWeeklyPlanRepository:
         draft: object,
     ) -> object:
         _ = (household_id, timezone, active_slots, draft)
+        raise NotImplementedError
+
+    async def confirm_plan(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+        confirmed_at: datetime,
+    ) -> PlanConfirmationResult:
+        _ = (household_id, weekly_plan_id, confirmed_at)
         raise NotImplementedError
 
 

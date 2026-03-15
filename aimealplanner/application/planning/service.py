@@ -3,11 +3,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aimealplanner.application.planning.dto import (
+    PlanConfirmationResult,
     PlanDraftInput,
     PlanDraftResult,
     PlanningStartContext,
@@ -120,6 +122,29 @@ class PlanningService:
             )
             await session.commit()
             return plan
+
+    async def confirm_plan(
+        self,
+        telegram_user_id: int,
+        weekly_plan_id: UUID,
+    ) -> PlanConfirmationResult:
+        async with self._session_factory() as session:
+            repositories = self._repositories_factory(session)
+            user = await repositories.user_repository.get_by_telegram_user_id(telegram_user_id)
+            if user is None:
+                raise ValueError("Профиль не найден. Сначала отправь /start.")
+
+            household = await repositories.household_repository.get_by_user_id(user.id)
+            if household is None or household.onboarding_completed_at is None:
+                raise ValueError("Сначала заверши стартовую настройку через /start.")
+
+            result = await repositories.weekly_plan_repository.confirm_plan(
+                household.id,
+                weekly_plan_id,
+                confirmed_at=self._clock(),
+            )
+            await session.commit()
+            return result
 
 
 def _validate_draft_input(

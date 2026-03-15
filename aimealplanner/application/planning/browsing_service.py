@@ -17,11 +17,13 @@ from aimealplanner.application.planning.repositories import (
     PlanningRepositories,
     PlanningRepositoryBundleFactory,
 )
+from aimealplanner.infrastructure.db.enums import WeeklyPlanStatus
 
 
 @dataclass(frozen=True, slots=True)
 class RenderablePlanOverview:
     weekly_plan_id: UUID
+    status: WeeklyPlanStatus
     start_date: date
     end_date: date
     text: str
@@ -36,7 +38,7 @@ class PlanningBrowsingService:
         self._session_factory = session_factory
         self._repositories_factory = repositories_factory
 
-    async def get_latest_draft_overview(self, telegram_user_id: int) -> RenderablePlanOverview:
+    async def get_latest_overview(self, telegram_user_id: int) -> RenderablePlanOverview:
         async with self._session_factory() as session:
             repositories = self._repositories_factory(session)
             user = await repositories.user_repository.get_by_telegram_user_id(telegram_user_id)
@@ -47,25 +49,30 @@ class PlanningBrowsingService:
             if household is None or household.onboarding_completed_at is None:
                 raise ValueError("Сначала заверши стартовую настройку через /start.")
 
-            latest_draft = await repositories.weekly_plan_repository.get_latest_draft_for_household(
+            latest_plan = await _resolve_latest_visible_plan(
+                repositories,
                 household.id,
             )
-            if latest_draft is None:
-                raise ValueError("Текущего черновика пока нет. Создай его командой /plan.")
+            if latest_plan is None:
+                raise ValueError("Текущего плана пока нет. Создай его командой /plan.")
 
             overview = await repositories.weekly_plan_repository.get_plan_overview(
                 household.id,
-                latest_draft.id,
+                latest_plan.id,
             )
             if overview is None:
-                raise ValueError("Не удалось открыть текущий черновик.")
+                raise ValueError("Не удалось открыть текущий план.")
 
             return RenderablePlanOverview(
                 weekly_plan_id=overview.weekly_plan_id,
+                status=overview.status,
                 start_date=overview.start_date,
                 end_date=overview.end_date,
                 text=render_plan_overview(overview),
             )
+
+    async def get_latest_draft_overview(self, telegram_user_id: int) -> RenderablePlanOverview:
+        return await self.get_latest_overview(telegram_user_id)
 
     async def get_day_view(
         self,
@@ -132,9 +139,23 @@ async def _resolve_household_id(
     return household.id
 
 
+async def _resolve_latest_visible_plan(
+    repositories: PlanningRepositories,
+    household_id: UUID,
+):
+    latest_draft = await repositories.weekly_plan_repository.get_latest_draft_for_household(
+        household_id,
+    )
+    if latest_draft is not None:
+        return latest_draft
+    return await repositories.weekly_plan_repository.get_latest_confirmed_for_household(
+        household_id,
+    )
+
+
 def render_plan_overview(overview: StoredPlanOverview) -> str:
     lines = [
-        "Текущий план недели.",
+        _render_plan_status_title(overview.status),
         (
             f"Период: {overview.start_date.strftime('%d.%m.%Y')} - "
             f"{overview.end_date.strftime('%d.%m.%Y')}."
@@ -168,6 +189,12 @@ def render_plan_overview(overview: StoredPlanOverview) -> str:
     lines.append("")
     lines.append("Выбери день, чтобы посмотреть блюда подробнее.")
     return "\n".join(lines)
+
+
+def _render_plan_status_title(status: WeeklyPlanStatus) -> str:
+    if status is WeeklyPlanStatus.CONFIRMED:
+        return "Подтвержденный план недели."
+    return "Черновик недели."
 
 
 def _weekday_name(value: date) -> str:

@@ -14,10 +14,12 @@ from aimealplanner.application.planning.browsing_dto import (
     StoredPlanOverview,
 )
 from aimealplanner.application.planning.dto import (
+    PlanConfirmationResult,
     PlanDraftResult,
     StoredDraftPlan,
     StoredPlanningHousehold,
     StoredPlanningUser,
+    StoredPlanReference,
 )
 from aimealplanner.application.planning.generation_dto import (
     GeneratedWeekPlan,
@@ -81,6 +83,7 @@ class FakeWeeklyPlanRepository:
     created_drafts: list[tuple[UUID, str, list[str], PlanDraftInput]] = field(default_factory=list)
     existing_drafts_by_household_id: dict[UUID, list[StoredDraftPlan]] = field(default_factory=dict)
     deleted_household_ids: list[UUID] = field(default_factory=list)
+    confirmed_plan_calls: list[tuple[UUID, UUID, datetime]] = field(default_factory=list)
 
     async def get_latest_draft_for_household(self, household_id: UUID) -> StoredDraftPlan | None:
         drafts = self.existing_drafts_by_household_id.get(household_id, [])
@@ -93,6 +96,13 @@ class FakeWeeklyPlanRepository:
         deleted_count = len(self.existing_drafts_by_household_id.get(household_id, []))
         self.existing_drafts_by_household_id[household_id] = []
         return deleted_count
+
+    async def get_latest_confirmed_for_household(
+        self,
+        household_id: UUID,
+    ) -> StoredPlanReference | None:
+        _ = household_id
+        return None
 
     async def get_plan_overview(
         self,
@@ -159,6 +169,18 @@ class FakeWeeklyPlanRepository:
             end_date=draft.end_date,
             active_slots=active_slots,
             pantry_considered=draft.pantry_considered,
+        )
+
+    async def confirm_plan(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+        confirmed_at: datetime,
+    ) -> PlanConfirmationResult:
+        self.confirmed_plan_calls.append((household_id, weekly_plan_id, confirmed_at))
+        return PlanConfirmationResult(
+            weekly_plan_id=weekly_plan_id,
+            confirmed_at=confirmed_at,
         )
 
     async def get_generation_context(
@@ -351,6 +373,26 @@ async def test_discard_existing_drafts_deletes_household_drafts_and_commits() ->
     assert world.session.commit_count == 1
     assert world.weekly_plan_repository.deleted_household_ids == [household.id]
     assert world.weekly_plan_repository.existing_drafts_by_household_id[household.id] == []
+
+
+@pytest.mark.asyncio
+async def test_confirm_plan_marks_draft_as_confirmed_and_commits() -> None:
+    world = FakePlanningWorld()
+    user, household = _build_user_and_household()
+    weekly_plan_id = uuid4()
+    now = datetime(2026, 3, 18, 9, 0, tzinfo=UTC)
+    world.user_repository.users_by_tg_id[user.telegram_user_id] = user
+    world.household_repository.households_by_user_id[user.id] = household
+    service = world.build_service(now=now)
+
+    result = await service.confirm_plan(user.telegram_user_id, weekly_plan_id)
+
+    assert result.weekly_plan_id == weekly_plan_id
+    assert result.confirmed_at == now
+    assert world.weekly_plan_repository.confirmed_plan_calls == [
+        (household.id, weekly_plan_id, now),
+    ]
+    assert world.session.commit_count == 1
 
 
 @pytest.mark.asyncio

@@ -516,6 +516,7 @@ async def _generate_week_plan_and_send(
                 result.weekly_plan_id,
                 result.start_date,
                 result.end_date,
+                allow_confirm=True,
             ),
         )
         await bot.send_message(

@@ -3,6 +3,7 @@ from aimealplanner.application.planning.browsing_service import (
     RenderablePlanOverview,
 )
 from aimealplanner.application.planning.dto import (
+    PlanConfirmationResult,
     PlanDraftInput,
     PlanDraftResult,
     PlanningStartContext,
@@ -28,6 +29,7 @@ __all__ = [
     "DishPolicyService",
     "DishReplacementService",
     "GeneratedWeekPlanResult",
+    "PlanConfirmationResult",
     "PlanDraftInput",
     "PlanDraftResult",
     "PlannedMealItemReplacement",

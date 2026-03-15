@@ -17,11 +17,13 @@ from aimealplanner.application.planning.browsing_dto import (
 )
 from aimealplanner.application.planning.browsing_service import PlanningBrowsingService
 from aimealplanner.application.planning.dto import (
+    PlanConfirmationResult,
     PlanDraftInput,
     PlanDraftResult,
     StoredDraftPlan,
     StoredPlanningHousehold,
     StoredPlanningUser,
+    StoredPlanReference,
 )
 from aimealplanner.application.planning.replacement_dto import PlannedMealItemReplacement
 from aimealplanner.application.planning.repositories import (
@@ -29,7 +31,11 @@ from aimealplanner.application.planning.repositories import (
     PlanningRepositoryBundleFactory,
     WeeklyPlanRepository,
 )
-from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict, RepeatabilityMode
+from aimealplanner.infrastructure.db.enums import (
+    DishFeedbackVerdict,
+    RepeatabilityMode,
+    WeeklyPlanStatus,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -76,6 +82,7 @@ class FakePlanningHouseholdRepository:
 @dataclass
 class FakeWeeklyPlanRepository:
     latest_draft_by_household_id: dict[UUID, UUID] = field(default_factory=dict)
+    latest_confirmed_by_household_id: dict[UUID, UUID] = field(default_factory=dict)
     overviews_by_plan_id: dict[UUID, StoredPlanOverview] = field(default_factory=dict)
 
     async def get_latest_draft_for_household(self, household_id: UUID) -> StoredDraftPlan | None:
@@ -87,6 +94,21 @@ class FakeWeeklyPlanRepository:
             id=overview.weekly_plan_id,
             start_date=overview.start_date,
             end_date=overview.end_date,
+        )
+
+    async def get_latest_confirmed_for_household(
+        self,
+        household_id: UUID,
+    ) -> StoredPlanReference | None:
+        weekly_plan_id = self.latest_confirmed_by_household_id.get(household_id)
+        if weekly_plan_id is None:
+            return None
+        overview = self.overviews_by_plan_id[weekly_plan_id]
+        return StoredPlanReference(
+            id=overview.weekly_plan_id,
+            start_date=overview.start_date,
+            end_date=overview.end_date,
+            status=overview.status,
         )
 
     async def get_plan_overview(
@@ -166,6 +188,15 @@ class FakeWeeklyPlanRepository:
         _ = (household_id, timezone, active_slots, draft)
         raise NotImplementedError
 
+    async def confirm_plan(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+        confirmed_at: datetime,
+    ) -> PlanConfirmationResult:
+        _ = (household_id, weekly_plan_id, confirmed_at)
+        raise NotImplementedError
+
 
 def _build_service(
     user_repository: FakePlanningUserRepository,
@@ -211,7 +242,7 @@ def _build_user_and_household() -> tuple[StoredPlanningUser, StoredPlanningHouse
 
 
 @pytest.mark.asyncio
-async def test_get_latest_draft_overview_renders_days_message() -> None:
+async def test_get_latest_overview_renders_draft_days_message() -> None:
     user_repository = FakePlanningUserRepository()
     household_repository = FakePlanningHouseholdRepository()
     weekly_plan_repository = FakeWeeklyPlanRepository()
@@ -222,6 +253,7 @@ async def test_get_latest_draft_overview_renders_days_message() -> None:
     weekly_plan_repository.latest_draft_by_household_id[household.id] = weekly_plan_id
     weekly_plan_repository.overviews_by_plan_id[weekly_plan_id] = StoredPlanOverview(
         weekly_plan_id=weekly_plan_id,
+        status=WeeklyPlanStatus.DRAFT,
         start_date=date(2026, 3, 23),
         end_date=date(2026, 3, 29),
         days=[
@@ -259,10 +291,11 @@ async def test_get_latest_draft_overview_renders_days_message() -> None:
     )
     service = _build_service(user_repository, household_repository, weekly_plan_repository)
 
-    overview = await service.get_latest_draft_overview(user.telegram_user_id)
+    overview = await service.get_latest_overview(user.telegram_user_id)
 
     assert overview.weekly_plan_id == weekly_plan_id
-    assert "Текущий план недели." in overview.text
+    assert overview.status is WeeklyPlanStatus.DRAFT
+    assert "Черновик недели." in overview.text
     assert "23.03.2026 (понедельник)" in overview.text
     assert "Завтрак: Овсянка" in overview.text
     assert "Ужин: Паста с курицей" in overview.text
@@ -270,7 +303,33 @@ async def test_get_latest_draft_overview_renders_days_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_latest_draft_overview_requires_existing_draft() -> None:
+async def test_get_latest_overview_falls_back_to_confirmed_plan() -> None:
+    user_repository = FakePlanningUserRepository()
+    household_repository = FakePlanningHouseholdRepository()
+    weekly_plan_repository = FakeWeeklyPlanRepository()
+    user, household = _build_user_and_household()
+    weekly_plan_id = uuid4()
+    user_repository.users_by_tg_id[user.telegram_user_id] = user
+    household_repository.households_by_user_id[user.id] = household
+    weekly_plan_repository.latest_confirmed_by_household_id[household.id] = weekly_plan_id
+    weekly_plan_repository.overviews_by_plan_id[weekly_plan_id] = StoredPlanOverview(
+        weekly_plan_id=weekly_plan_id,
+        status=WeeklyPlanStatus.CONFIRMED,
+        start_date=date(2026, 3, 23),
+        end_date=date(2026, 3, 29),
+        days=[],
+    )
+    service = _build_service(user_repository, household_repository, weekly_plan_repository)
+
+    overview = await service.get_latest_overview(user.telegram_user_id)
+
+    assert overview.weekly_plan_id == weekly_plan_id
+    assert overview.status is WeeklyPlanStatus.CONFIRMED
+    assert "Подтвержденный план недели." in overview.text
+
+
+@pytest.mark.asyncio
+async def test_get_latest_overview_requires_existing_plan() -> None:
     user_repository = FakePlanningUserRepository()
     household_repository = FakePlanningHouseholdRepository()
     weekly_plan_repository = FakeWeeklyPlanRepository()
@@ -279,5 +338,5 @@ async def test_get_latest_draft_overview_requires_existing_draft() -> None:
     household_repository.households_by_user_id[user.id] = household
     service = _build_service(user_repository, household_repository, weekly_plan_repository)
 
-    with pytest.raises(ValueError, match="Текущего черновика пока нет"):
-        await service.get_latest_draft_overview(user.telegram_user_id)
+    with pytest.raises(ValueError, match="Текущего плана пока нет"):
+        await service.get_latest_overview(user.telegram_user_id)

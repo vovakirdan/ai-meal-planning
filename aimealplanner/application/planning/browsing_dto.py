@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from aimealplanner.application.planning.generation_dto import DishQuickAction
-from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict
+from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict, WeeklyPlanStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +19,7 @@ class StoredPlanDaySummary:
 @dataclass(frozen=True, slots=True)
 class StoredPlanOverview:
     weekly_plan_id: UUID
+    status: WeeklyPlanStatus
     start_date: date
     end_date: date
     days: list[StoredPlanDaySummary]

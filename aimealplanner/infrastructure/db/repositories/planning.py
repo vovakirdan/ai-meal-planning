@@ -1,7 +1,8 @@
+# ruff: noqa: RUF001
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -19,11 +20,13 @@ from aimealplanner.application.planning.browsing_dto import (
     StoredPlanOverview,
 )
 from aimealplanner.application.planning.dto import (
+    PlanConfirmationResult,
     PlanDraftInput,
     PlanDraftResult,
     StoredDraftPlan,
     StoredPlanningHousehold,
     StoredPlanningUser,
+    StoredPlanReference,
 )
 from aimealplanner.application.planning.generation_dto import (
     DishQuickAction,
@@ -137,6 +140,32 @@ class SqlAlchemyWeeklyPlanRepository:
             end_date=record.end_date,
         )
 
+    async def get_latest_confirmed_for_household(
+        self,
+        household_id: UUID,
+    ) -> StoredPlanReference | None:
+        statement = (
+            select(WeeklyPlanRecord)
+            .where(
+                WeeklyPlanRecord.household_id == household_id,
+                WeeklyPlanRecord.status == WeeklyPlanStatus.CONFIRMED,
+            )
+            .order_by(
+                WeeklyPlanRecord.confirmed_at.desc(),
+                WeeklyPlanRecord.created_at.desc(),
+            )
+            .limit(1)
+        )
+        record = await self._session.scalar(statement)
+        if record is None:
+            return None
+        return StoredPlanReference(
+            id=record.id,
+            start_date=record.start_date,
+            end_date=record.end_date,
+            status=record.status,
+        )
+
     async def delete_drafts_for_household(self, household_id: UUID) -> int:
         count_statement = select(func.count(WeeklyPlanRecord.id)).where(
             WeeklyPlanRecord.household_id == household_id,
@@ -165,7 +194,9 @@ class SqlAlchemyWeeklyPlanRepository:
             .where(
                 WeeklyPlanRecord.id == weekly_plan_id,
                 WeeklyPlanRecord.household_id == household_id,
-                WeeklyPlanRecord.status == WeeklyPlanStatus.DRAFT,
+                WeeklyPlanRecord.status.in_(
+                    [WeeklyPlanStatus.DRAFT, WeeklyPlanStatus.CONFIRMED],
+                ),
             )
         )
         record = await self._session.scalar(statement)
@@ -178,6 +209,7 @@ class SqlAlchemyWeeklyPlanRepository:
 
         return StoredPlanOverview(
             weekly_plan_id=record.id,
+            status=record.status,
             start_date=record.start_date,
             end_date=record.end_date,
             days=[
@@ -210,7 +242,9 @@ class SqlAlchemyWeeklyPlanRepository:
         plan_statement = select(WeeklyPlanRecord.id).where(
             WeeklyPlanRecord.id == weekly_plan_id,
             WeeklyPlanRecord.household_id == household_id,
-            WeeklyPlanRecord.status == WeeklyPlanStatus.DRAFT,
+            WeeklyPlanRecord.status.in_(
+                [WeeklyPlanStatus.DRAFT, WeeklyPlanStatus.CONFIRMED],
+            ),
         )
         plan_id = await self._session.scalar(plan_statement)
         if plan_id is None:
@@ -326,15 +360,35 @@ class SqlAlchemyWeeklyPlanRepository:
         self,
         replacement: PlannedMealItemReplacement,
     ) -> None:
-        record = await self._session.get(PlannedMealItemRecord, replacement.planned_meal_item_id)
+        statement = (
+            select(PlannedMealItemRecord)
+            .options(
+                selectinload(PlannedMealItemRecord.planned_meal).selectinload(
+                    PlannedMealRecord.weekly_plan,
+                ),
+            )
+            .where(PlannedMealItemRecord.id == replacement.planned_meal_item_id)
+        )
+        record = await self._session.scalar(statement)
         if record is None:
             raise ValueError("Planned meal item not found")
+
+        replacement_dish_id: UUID | None = None
+        if (
+            replacement.clear_dish_link
+            and record.planned_meal.weekly_plan.status == WeeklyPlanStatus.CONFIRMED
+        ):
+            replacement_dish = await self._find_or_create_dish(
+                replacement.name,
+                replacement.snapshot_payload,
+            )
+            replacement_dish_id = replacement_dish.id
 
         record.snapshot_name = replacement.name
         record.snapshot_payload = replacement.snapshot_payload
         record.adaptation_notes = replacement.adaptation_notes
         if replacement.clear_dish_link:
-            record.dish_id = None
+            record.dish_id = replacement_dish_id
         await self._session.flush()
 
     async def ensure_item_dish(
@@ -437,6 +491,48 @@ class SqlAlchemyWeeklyPlanRepository:
             end_date=record.end_date,
             active_slots=list(record.active_slots),
             pantry_considered=record.pantry_considered,
+        )
+
+    async def confirm_plan(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+        confirmed_at: datetime,
+    ) -> PlanConfirmationResult:
+        statement = (
+            select(WeeklyPlanRecord)
+            .options(
+                selectinload(WeeklyPlanRecord.planned_meals).selectinload(
+                    PlannedMealRecord.items,
+                ),
+            )
+            .where(
+                WeeklyPlanRecord.id == weekly_plan_id,
+                WeeklyPlanRecord.household_id == household_id,
+            )
+        )
+        record = await self._session.scalar(statement)
+        if record is None:
+            raise ValueError("Не удалось найти выбранный план.")
+        if record.status != WeeklyPlanStatus.DRAFT:
+            raise ValueError("Этот план уже подтвержден.")
+        if not any(meal.items for meal in record.planned_meals):
+            raise ValueError("Нельзя подтвердить пустой план недели.")
+
+        for meal in record.planned_meals:
+            for item in meal.items:
+                if item.dish_id is not None:
+                    continue
+                dish = await self._find_or_create_dish_from_item(item)
+                item.dish_id = dish.id
+        await self._session.flush()
+
+        record.status = WeeklyPlanStatus.CONFIRMED
+        record.confirmed_at = confirmed_at
+        await self._session.flush()
+        return PlanConfirmationResult(
+            weekly_plan_id=record.id,
+            confirmed_at=confirmed_at,
         )
 
     async def get_generation_context(
@@ -563,8 +659,15 @@ class SqlAlchemyWeeklyPlanRepository:
         await self._session.flush()
 
     async def _find_or_create_dish_from_item(self, item: PlannedMealItemRecord) -> DishRecord:
-        normalized_name = _normalize_name(item.snapshot_name)
-        canonical_key = _build_dish_canonical_key(item.snapshot_name, item.snapshot_payload)
+        return await self._find_or_create_dish(item.snapshot_name, item.snapshot_payload)
+
+    async def _find_or_create_dish(
+        self,
+        snapshot_name: str,
+        snapshot_payload: dict[str, Any],
+    ) -> DishRecord:
+        normalized_name = _normalize_name(snapshot_name)
+        canonical_key = _build_dish_canonical_key(snapshot_name, snapshot_payload)
 
         dish_statement = None
         if canonical_key is not None:
@@ -576,10 +679,10 @@ class SqlAlchemyWeeklyPlanRepository:
         if dish is not None:
             return dish
 
-        summary_value = item.snapshot_payload.get("summary")
+        summary_value = snapshot_payload.get("summary")
         summary = summary_value.strip() if isinstance(summary_value, str) else None
         dish = DishRecord(
-            canonical_name=item.snapshot_name,
+            canonical_name=snapshot_name,
             normalized_name=normalized_name,
             canonical_key=canonical_key,
             summary=summary,
@@ -587,11 +690,11 @@ class SqlAlchemyWeeklyPlanRepository:
         self._session.add(dish)
         await self._session.flush()
 
-        recipe = _build_recipe_record(dish.id, item.snapshot_payload)
+        recipe = _build_recipe_record(dish.id, snapshot_payload)
         if recipe is not None:
             self._session.add(recipe)
 
-        snapshot_ingredients = _extract_snapshot_ingredients(item.snapshot_payload)
+        snapshot_ingredients = _extract_snapshot_ingredients(snapshot_payload)
         for position, ingredient_payload in enumerate(snapshot_ingredients):
             ingredient_name = ingredient_payload["name"]
             ingredient = await self._get_or_create_ingredient(ingredient_name)

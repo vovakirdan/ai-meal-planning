@@ -1,6 +1,7 @@
 # ruff: noqa: RUF001
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from datetime import date
 from typing import cast
@@ -19,6 +20,7 @@ from aimealplanner.application.planning import (
     DishReplacementService,
     PlannedMealItemReplacement,
     PlanningBrowsingService,
+    PlanningService,
     ReplacementCandidate,
 )
 from aimealplanner.application.planning.browsing_dto import (
@@ -28,7 +30,7 @@ from aimealplanner.application.planning.browsing_dto import (
 )
 from aimealplanner.application.planning.generation_dto import DishQuickAction
 from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
-from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict
+from aimealplanner.infrastructure.db.enums import DishFeedbackVerdict, WeeklyPlanStatus
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
 from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
 from aimealplanner.presentation.telegram.keyboards.onboarding import CANCEL_LABEL, remove_keyboard
@@ -41,6 +43,7 @@ from aimealplanner.presentation.telegram.keyboards.planning import (
     build_reject_action_keyboard,
     build_reject_reason_keyboard,
     build_replacement_candidates_keyboard,
+    parse_plan_confirm_callback,
     parse_plan_custom_edit_callback,
     parse_plan_day_callback,
     parse_plan_item_callback,
@@ -54,6 +57,8 @@ from aimealplanner.presentation.telegram.keyboards.planning import (
 )
 from aimealplanner.presentation.telegram.states.plan_browser import PlanBrowserStates
 
+logger = logging.getLogger(__name__)
+
 
 def build_plan_browser_router(
     session_factory: async_sessionmaker[AsyncSession],
@@ -63,6 +68,7 @@ def build_plan_browser_router(
 ) -> Router:
     router = Router(name="plan_browser")
     browsing_service = PlanningBrowsingService(session_factory, build_planning_repositories)
+    planning_service = PlanningService(session_factory, build_planning_repositories)
     policy_service = DishPolicyService(
         session_factory,
         build_planning_repositories,
@@ -78,7 +84,7 @@ def build_plan_browser_router(
     @router.message(Command("week"))
     async def handle_week_command(message: Message) -> None:
         try:
-            overview = await browsing_service.get_latest_draft_overview(
+            overview = await browsing_service.get_latest_overview(
                 _require_telegram_user_id_from_message(message),
             )
         except ValueError as err:
@@ -91,6 +97,7 @@ def build_plan_browser_router(
                 overview.weekly_plan_id,
                 overview.start_date,
                 overview.end_date,
+                allow_confirm=overview.status == WeeklyPlanStatus.DRAFT,
             ),
         )
 
@@ -103,7 +110,7 @@ def build_plan_browser_router(
             return
 
         try:
-            overview = await browsing_service.get_latest_draft_overview(
+            overview = await browsing_service.get_latest_overview(
                 _require_telegram_user_id_from_callback(callback),
             )
         except ValueError as err:
@@ -120,8 +127,48 @@ def build_plan_browser_router(
                 overview.weekly_plan_id,
                 overview.start_date,
                 overview.end_date,
+                allow_confirm=overview.status == WeeklyPlanStatus.DRAFT,
             ),
         )
+
+    @router.callback_query(F.data.startswith("pf:"))
+    async def handle_plan_confirm_callback(callback: CallbackQuery) -> None:
+        callback_data = cast(str, callback.data)
+        weekly_plan_id = parse_plan_confirm_callback(callback_data)
+        if weekly_plan_id is None:
+            await callback.answer("Не получилось подтвердить неделю.", show_alert=True)
+            return
+
+        try:
+            await planning_service.confirm_plan(
+                _require_telegram_user_id_from_callback(callback),
+                weekly_plan_id,
+            )
+            overview = await browsing_service.get_latest_overview(
+                _require_telegram_user_id_from_callback(callback),
+            )
+        except ValueError as err:
+            await callback.answer(str(err), show_alert=True)
+            return
+        except Exception:
+            await callback.answer(
+                "Не удалось подтвердить неделю. Попробуй еще раз через пару секунд.",
+                show_alert=True,
+            )
+            raise
+
+        await _edit_callback_message(
+            callback,
+            text=overview.text,
+            reply_markup=build_plan_days_keyboard(
+                overview.weekly_plan_id,
+                overview.start_date,
+                overview.end_date,
+                allow_confirm=overview.status == WeeklyPlanStatus.DRAFT,
+            ),
+            answer_callback=False,
+        )
+        await callback.answer("План на неделю подтвержден.")
 
     @router.callback_query(F.data.startswith("pd:"))
     async def handle_plan_day_callback(callback: CallbackQuery) -> None:
@@ -603,6 +650,13 @@ def build_plan_browser_router(
             )
         except ValueError as err:
             await callback.answer(str(err), show_alert=True)
+            return
+        except Exception:
+            logger.exception("failed to apply replacement for item %s", planned_meal_item_id)
+            await callback.answer(
+                "Не удалось применить замену. Попробуй еще раз через пару секунд.",
+                show_alert=True,
+            )
             return
 
         await _clear_replacement_candidates(state, planned_meal_item_id)

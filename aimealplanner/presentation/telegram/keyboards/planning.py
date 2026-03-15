@@ -34,6 +34,7 @@ _PLAN_CUSTOM_EDIT_PREFIX = "pe"
 _PLAN_POLICY_PREFIX = "pp"
 _PLAN_SUGGESTED_ACTION_PREFIX = "ps"
 _PLAN_REJECT_FLOW_PREFIX = "pn"
+_PLAN_CONFIRM_PREFIX = "pf"
 
 
 def build_range_choice_keyboard() -> ReplyKeyboardMarkup:
@@ -65,8 +66,19 @@ def build_plan_days_keyboard(
     weekly_plan_id: UUID,
     start_date: date,
     end_date: date,
+    *,
+    allow_confirm: bool = False,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    if allow_confirm:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Подтвердить неделю",
+                    callback_data=build_plan_confirm_callback(weekly_plan_id),
+                ),
+            ],
+        )
     current_date = start_date
     while current_date <= end_date:
         rows.append(
@@ -317,6 +329,10 @@ def build_plan_reject_flow_callback(planned_meal_item_id: UUID, action: str) -> 
     return f"{_PLAN_REJECT_FLOW_PREFIX}:{planned_meal_item_id.hex}:{action}"
 
 
+def build_plan_confirm_callback(weekly_plan_id: UUID) -> str:
+    return f"{_PLAN_CONFIRM_PREFIX}:{weekly_plan_id.hex}"
+
+
 def parse_plan_week_callback(value: str) -> UUID | None:
     return _parse_uuid_callback(value, prefix=_PLAN_WEEK_PREFIX, expected_parts=2)
 
@@ -420,6 +436,10 @@ def parse_plan_reject_flow_callback(value: str) -> tuple[UUID, str] | None:
     if not action:
         return None
     return (planned_meal_item_id, action)
+
+
+def parse_plan_confirm_callback(value: str) -> UUID | None:
+    return _parse_uuid_callback(value, prefix=_PLAN_CONFIRM_PREFIX, expected_parts=2)
 
 
 def _parse_uuid_callback(value: str, *, prefix: str, expected_parts: int) -> UUID | None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -15,11 +15,13 @@ from aimealplanner.application.planning.browsing_dto import (
     StoredPlanOverview,
 )
 from aimealplanner.application.planning.dto import (
+    PlanConfirmationResult,
     PlanDraftInput,
     PlanDraftResult,
     StoredDraftPlan,
     StoredPlanningHousehold,
     StoredPlanningUser,
+    StoredPlanReference,
 )
 from aimealplanner.application.planning.generation_dto import (
     GeneratedWeekPlan,
@@ -44,6 +46,11 @@ class WeeklyPlanRepository(Protocol):
         self,
         household_id: UUID,
     ) -> StoredDraftPlan | None: ...
+
+    async def get_latest_confirmed_for_household(
+        self,
+        household_id: UUID,
+    ) -> StoredPlanReference | None: ...
 
     async def delete_drafts_for_household(self, household_id: UUID) -> int: ...
 
@@ -115,6 +122,13 @@ class WeeklyPlanRepository(Protocol):
         active_slots: list[str],
         draft: PlanDraftInput,
     ) -> PlanDraftResult: ...
+
+    async def confirm_plan(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+        confirmed_at: datetime,
+    ) -> PlanConfirmationResult: ...
 
 
 @dataclass(frozen=True, slots=True)

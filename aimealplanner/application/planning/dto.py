@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from aimealplanner.infrastructure.db.enums import RepeatabilityMode
+from aimealplanner.infrastructure.db.enums import RepeatabilityMode, WeeklyPlanStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +31,14 @@ class StoredDraftPlan:
     id: UUID
     start_date: date
     end_date: date
+
+
+@dataclass(frozen=True, slots=True)
+class StoredPlanReference:
+    id: UUID
+    start_date: date
+    end_date: date
+    status: WeeklyPlanStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,3 +72,9 @@ class PlanDraftResult:
     end_date: date
     active_slots: list[str]
     pantry_considered: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PlanConfirmationResult:
+    weekly_plan_id: UUID
+    confirmed_at: datetime
