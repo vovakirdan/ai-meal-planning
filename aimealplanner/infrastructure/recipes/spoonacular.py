@@ -72,6 +72,19 @@ class SpoonacularRecipeHintProvider:
         if params is None:
             return []
 
+        return await self._search(params)
+
+    async def search_related_recipes(
+        self,
+        query: str,
+        context: WeeklyPlanGenerationContext,
+    ) -> list[RecipeHint]:
+        params = _build_search_params(context, max_results=self._max_results, query=query)
+        if params is None:
+            return []
+        return await self._search(params)
+
+    async def _search(self, params: dict[str, str]) -> list[RecipeHint]:
         try:
             response = await self._client.get(
                 "/recipes/complexSearch",
@@ -115,12 +128,13 @@ def _build_search_params(
     context: WeeklyPlanGenerationContext,
     *,
     max_results: int,
+    query: str | None = None,
 ) -> dict[str, str] | None:
     cuisines = _collect_cuisine_hints(context)
     diet = _map_diet_hint(context.week_mood)
     excluded_ingredients = _collect_excluded_ingredients(context.members)
 
-    if not cuisines and diet is None and not excluded_ingredients:
+    if not cuisines and diet is None and not excluded_ingredients and query is None:
         return None
 
     params: dict[str, str] = {
@@ -131,6 +145,8 @@ def _build_search_params(
         "sort": "popularity",
         "type": "main course",
     }
+    if query is not None and query.strip():
+        params["query"] = query.strip()
     if cuisines:
         params["cuisine"] = ",".join(cuisines)
     if diet is not None:

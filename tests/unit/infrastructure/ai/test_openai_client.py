@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 from __future__ import annotations
 
 import json
@@ -9,6 +10,7 @@ from aimealplanner.application.planning.generation_dto import (
     WeeklyPlanGenerationContext,
 )
 from aimealplanner.infrastructure.ai.openai_client import (
+    _parse_replacement_payload,
     _parse_week_plan_payload,
 )
 from aimealplanner.infrastructure.db.enums import RepeatabilityMode
@@ -96,3 +98,69 @@ def test_parse_week_plan_payload_rejects_missing_expected_meal() -> None:
 
     with pytest.raises(ValueError, match="AI payload is missing meals"):
         _parse_week_plan_payload(context, raw_content)
+
+
+def test_parse_replacement_payload_accepts_exactly_three_unique_candidates() -> None:
+    raw_content = json.dumps(
+        {
+            "candidates": [
+                {
+                    "name": "Рыба с рисом",
+                    "summary": "Легкий ужин без тяжести",
+                    "adaptation_notes": ["без оливок"],
+                    "reason": "Подходит под ограничения семьи",
+                },
+                {
+                    "name": "Курица с булгуром",
+                    "summary": "Быстрый ужин на будни",
+                    "adaptation_notes": [],
+                    "reason": None,
+                },
+                {
+                    "name": "Тефтели с картофелем",
+                    "summary": "Более привычный семейный вариант",
+                    "adaptation_notes": ["меньше масла"],
+                    "reason": "Сохраняет формат сытного ужина",
+                },
+            ],
+        },
+    )
+
+    parsed = _parse_replacement_payload(raw_content)
+
+    assert [candidate.name for candidate in parsed] == [
+        "Рыба с рисом",
+        "Курица с булгуром",
+        "Тефтели с картофелем",
+    ]
+    assert parsed[0].adaptation_notes == ["без оливок"]
+
+
+def test_parse_replacement_payload_rejects_duplicate_names() -> None:
+    raw_content = json.dumps(
+        {
+            "candidates": [
+                {
+                    "name": "Рыба с рисом",
+                    "summary": "Легкий ужин",
+                    "adaptation_notes": [],
+                    "reason": None,
+                },
+                {
+                    "name": "Рыба с рисом",
+                    "summary": "Почти то же самое",
+                    "adaptation_notes": [],
+                    "reason": None,
+                },
+                {
+                    "name": "Курица с булгуром",
+                    "summary": "Быстрый ужин",
+                    "adaptation_notes": [],
+                    "reason": None,
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="Duplicate replacement candidate"):
+        _parse_replacement_payload(raw_content)

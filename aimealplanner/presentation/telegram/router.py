@@ -29,5 +29,11 @@ def build_router(
             recipe_hint_provider=recipe_hint_provider,
         ),
     )
-    router.include_router(build_plan_browser_router(session_factory))
+    router.include_router(
+        build_plan_browser_router(
+            session_factory,
+            weekly_plan_generator=weekly_plan_generator,
+            recipe_hint_provider=recipe_hint_provider,
+        ),
+    )
     return router

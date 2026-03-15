@@ -23,9 +23,11 @@ from aimealplanner.application.planning.generation_dto import (
     GeneratedWeekPlan,
     WeeklyPlanGenerationContext,
 )
+from aimealplanner.application.planning.replacement_dto import PlannedMealItemReplacement
 from aimealplanner.application.planning.repositories import (
     PlanningRepositories,
     PlanningRepositoryBundleFactory,
+    WeeklyPlanRepository,
 )
 from aimealplanner.infrastructure.db.enums import RepeatabilityMode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -121,6 +123,10 @@ class FakeWeeklyPlanRepository:
     ) -> StoredPlanItemView | None:
         raise NotImplementedError
 
+    async def update_item_snapshot(self, replacement: PlannedMealItemReplacement) -> None:
+        _ = replacement
+        raise NotImplementedError
+
     async def create_draft(
         self,
         household_id: UUID,
@@ -166,7 +172,10 @@ class FakePlanningWorld:
         repositories = PlanningRepositories(
             user_repository=self.user_repository,
             household_repository=self.household_repository,
-            weekly_plan_repository=self.weekly_plan_repository,
+            weekly_plan_repository=cast(
+                WeeklyPlanRepository,
+                self.weekly_plan_repository,
+            ),
         )
         session_factory = cast(
             async_sessionmaker[AsyncSession],

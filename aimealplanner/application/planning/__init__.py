@@ -11,15 +11,27 @@ from aimealplanner.application.planning.generation_service import (
     GeneratedWeekPlanResult,
     WeeklyPlanGenerationService,
 )
+from aimealplanner.application.planning.replacement_dto import (
+    PlannedMealItemReplacement,
+    ReplacementCandidate,
+    ReplacementSuggestionResult,
+)
+from aimealplanner.application.planning.replacement_service import (
+    DishReplacementService,
+)
 from aimealplanner.application.planning.service import PlanningService
 
 __all__ = [
+    "DishReplacementService",
     "GeneratedWeekPlanResult",
     "PlanDraftInput",
     "PlanDraftResult",
+    "PlannedMealItemReplacement",
     "PlanningBrowsingService",
     "PlanningService",
     "PlanningStartContext",
     "RenderablePlanOverview",
+    "ReplacementCandidate",
+    "ReplacementSuggestionResult",
     "WeeklyPlanGenerationService",
 ]

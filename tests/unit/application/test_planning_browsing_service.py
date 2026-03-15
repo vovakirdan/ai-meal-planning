@@ -8,6 +8,9 @@ from uuid import UUID, uuid4
 import pytest
 from aimealplanner.application.planning.browsing_dto import (
     StoredPlanDaySummary,
+    StoredPlanDayView,
+    StoredPlanItemView,
+    StoredPlanMealView,
     StoredPlanOverview,
 )
 from aimealplanner.application.planning.browsing_service import PlanningBrowsingService
@@ -18,9 +21,11 @@ from aimealplanner.application.planning.dto import (
     StoredPlanningHousehold,
     StoredPlanningUser,
 )
+from aimealplanner.application.planning.replacement_dto import PlannedMealItemReplacement
 from aimealplanner.application.planning.repositories import (
     PlanningRepositories,
     PlanningRepositoryBundleFactory,
+    WeeklyPlanRepository,
 )
 from aimealplanner.infrastructure.db.enums import RepeatabilityMode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -99,19 +104,31 @@ class FakeWeeklyPlanRepository:
         household_id: UUID,
         weekly_plan_id: UUID,
         meal_date: date,
-    ):
+    ) -> StoredPlanDayView | None:
         _ = (household_id, weekly_plan_id, meal_date)
         raise NotImplementedError
 
-    async def get_meal_view(self, household_id: UUID, planned_meal_id: UUID):
+    async def get_meal_view(
+        self,
+        household_id: UUID,
+        planned_meal_id: UUID,
+    ) -> StoredPlanMealView | None:
         _ = (household_id, planned_meal_id)
         raise NotImplementedError
 
-    async def get_item_view(self, household_id: UUID, planned_meal_item_id: UUID):
+    async def get_item_view(
+        self,
+        household_id: UUID,
+        planned_meal_item_id: UUID,
+    ) -> StoredPlanItemView | None:
         _ = (household_id, planned_meal_item_id)
         raise NotImplementedError
 
-    async def get_generation_context(self, weekly_plan_id: UUID):
+    async def update_item_snapshot(self, replacement: PlannedMealItemReplacement) -> None:
+        _ = replacement
+        raise NotImplementedError
+
+    async def get_generation_context(self, weekly_plan_id: UUID) -> None:
         _ = weekly_plan_id
         raise NotImplementedError
 
@@ -135,18 +152,17 @@ def _build_service(
     household_repository: FakePlanningHouseholdRepository,
     weekly_plan_repository: FakeWeeklyPlanRepository,
 ) -> PlanningBrowsingService:
-    repositories = PlanningRepositories(
-        user_repository=user_repository,
-        household_repository=household_repository,
-        weekly_plan_repository=weekly_plan_repository,
-    )
     session_factory = cast(
         async_sessionmaker[AsyncSession],
         FakeSessionFactory(FakeSession()),
     )
     repositories_factory = cast(
         PlanningRepositoryBundleFactory,
-        lambda _session: repositories,
+        lambda _session: PlanningRepositories(
+            user_repository=user_repository,
+            household_repository=household_repository,
+            weekly_plan_repository=cast(WeeklyPlanRepository, weekly_plan_repository),
+        ),
     )
     return PlanningBrowsingService(
         session_factory,

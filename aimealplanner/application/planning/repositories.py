@@ -25,6 +25,9 @@ from aimealplanner.application.planning.generation_dto import (
     GeneratedWeekPlan,
     WeeklyPlanGenerationContext,
 )
+from aimealplanner.application.planning.replacement_dto import (
+    PlannedMealItemReplacement,
+)
 
 
 class PlanningUserRepository(Protocol):
@@ -67,6 +70,11 @@ class WeeklyPlanRepository(Protocol):
         household_id: UUID,
         planned_meal_item_id: UUID,
     ) -> StoredPlanItemView | None: ...
+
+    async def update_item_snapshot(
+        self,
+        replacement: PlannedMealItemReplacement,
+    ) -> None: ...
 
     async def get_generation_context(
         self,

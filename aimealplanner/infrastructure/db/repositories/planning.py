@@ -29,6 +29,9 @@ from aimealplanner.application.planning.generation_dto import (
     PlanningPantryItemContext,
     WeeklyPlanGenerationContext,
 )
+from aimealplanner.application.planning.replacement_dto import (
+    PlannedMealItemReplacement,
+)
 from aimealplanner.application.planning.repositories import PlanningRepositories
 from aimealplanner.infrastructure.db.enums import MealSlot, PlannedMealStatus, WeeklyPlanStatus
 from aimealplanner.infrastructure.db.models.household import (
@@ -278,6 +281,19 @@ class SqlAlchemyWeeklyPlanRepository:
             adaptation_notes=list(item.adaptation_notes),
             snapshot_payload=dict(item.snapshot_payload),
         )
+
+    async def update_item_snapshot(
+        self,
+        replacement: PlannedMealItemReplacement,
+    ) -> None:
+        record = await self._session.get(PlannedMealItemRecord, replacement.planned_meal_item_id)
+        if record is None:
+            raise ValueError("Planned meal item not found")
+
+        record.snapshot_name = replacement.name
+        record.snapshot_payload = replacement.snapshot_payload
+        record.adaptation_notes = replacement.adaptation_notes
+        await self._session.flush()
 
     async def create_draft(
         self,

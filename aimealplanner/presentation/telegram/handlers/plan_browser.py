@@ -1,39 +1,63 @@
 # ruff: noqa: RUF001
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date
 from typing import cast
+from uuid import UUID
 
 from aiogram import F, Router
+from aiogram.client.bot import Bot
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.utils.chat_action import ChatActionSender
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from aimealplanner.application.planning import PlanningBrowsingService
+from aimealplanner.application.planning import (
+    DishReplacementService,
+    PlannedMealItemReplacement,
+    PlanningBrowsingService,
+    ReplacementCandidate,
+)
 from aimealplanner.application.planning.browsing_dto import (
     StoredPlanDayView,
     StoredPlanItemView,
     StoredPlanMealView,
 )
+from aimealplanner.infrastructure.ai import OpenAIWeeklyPlanGenerator
 from aimealplanner.infrastructure.db.repositories import build_planning_repositories
+from aimealplanner.infrastructure.recipes import SpoonacularRecipeHintProvider
 from aimealplanner.presentation.telegram.keyboards.onboarding import remove_keyboard
 from aimealplanner.presentation.telegram.keyboards.planning import (
     build_plan_day_keyboard,
     build_plan_days_keyboard,
     build_plan_item_keyboard,
     build_plan_meal_keyboard,
+    build_replacement_candidates_keyboard,
     parse_plan_day_callback,
     parse_plan_item_callback,
     parse_plan_meal_callback,
+    parse_plan_replace_callback,
+    parse_plan_replace_choose_callback,
     parse_plan_week_callback,
 )
 
 
 def build_plan_browser_router(
     session_factory: async_sessionmaker[AsyncSession],
+    *,
+    weekly_plan_generator: OpenAIWeeklyPlanGenerator,
+    recipe_hint_provider: SpoonacularRecipeHintProvider | None,
 ) -> Router:
     router = Router(name="plan_browser")
     browsing_service = PlanningBrowsingService(session_factory, build_planning_repositories)
+    replacement_service = DishReplacementService(
+        session_factory,
+        build_planning_repositories,
+        suggestion_client=weekly_plan_generator,
+        recipe_hint_provider=recipe_hint_provider,
+    )
 
     @router.message(Command("week"))
     async def handle_week_command(message: Message) -> None:
@@ -168,6 +192,109 @@ def build_plan_browser_router(
                 item_view.weekly_plan_id,
                 item_view.meal_date,
                 item_view.planned_meal_id,
+                item_view.planned_meal_item_id,
+            ),
+        )
+
+    @router.callback_query(F.data.startswith("pr:"))
+    async def handle_plan_replace_callback(
+        callback: CallbackQuery,
+        state: FSMContext,
+    ) -> None:
+        callback_data = cast(str, callback.data)
+        planned_meal_item_id = parse_plan_replace_callback(callback_data)
+        if planned_meal_item_id is None:
+            await callback.answer("Не получилось подобрать замену.", show_alert=True)
+            return
+
+        message = _require_callback_message(callback)
+        await callback.answer("Подбираю варианты замены...")
+        async with ChatActionSender.typing(
+            bot=_require_callback_bot(callback),
+            chat_id=message.chat.id,
+        ):
+            try:
+                suggestion_result = await replacement_service.suggest_replacements(
+                    _require_telegram_user_id_from_callback(callback),
+                    planned_meal_item_id,
+                )
+            except ValueError as err:
+                await message.answer(str(err))
+                return
+
+        await _store_replacement_candidates(
+            state,
+            planned_meal_item_id=planned_meal_item_id,
+            candidates=suggestion_result.candidates,
+        )
+        await _edit_callback_message(
+            callback,
+            text=_render_replacement_candidates(
+                suggestion_result.item_view,
+                suggestion_result.candidates,
+            ),
+            reply_markup=build_replacement_candidates_keyboard(
+                planned_meal_item_id=planned_meal_item_id,
+                weekly_plan_id=suggestion_result.item_view.weekly_plan_id,
+                meal_date=suggestion_result.item_view.meal_date,
+                planned_meal_id=suggestion_result.item_view.planned_meal_id,
+                candidates=[
+                    (index, candidate.name)
+                    for index, candidate in enumerate(suggestion_result.candidates)
+                ],
+            ),
+            answer_callback=False,
+        )
+
+    @router.callback_query(F.data.startswith("pc:"))
+    async def handle_plan_replace_choose_callback(
+        callback: CallbackQuery,
+        state: FSMContext,
+    ) -> None:
+        callback_data = cast(str, callback.data)
+        parsed_value = parse_plan_replace_choose_callback(callback_data)
+        if parsed_value is None:
+            await callback.answer("Не получилось применить замену.", show_alert=True)
+            return
+
+        planned_meal_item_id, index = parsed_value
+        candidate = await _get_replacement_candidate(
+            state,
+            planned_meal_item_id=planned_meal_item_id,
+            index=index,
+        )
+        if candidate is None:
+            await callback.answer("Варианты замены устарели. Подбери их заново.", show_alert=True)
+            return
+
+        try:
+            apply_result = await replacement_service.apply_replacement(
+                _require_telegram_user_id_from_callback(callback),
+                PlannedMealItemReplacement(
+                    planned_meal_item_id=planned_meal_item_id,
+                    name=candidate.name,
+                    summary=candidate.summary,
+                    adaptation_notes=candidate.adaptation_notes,
+                    snapshot_payload={
+                        "summary": candidate.summary,
+                        "replacement_reason": candidate.reason,
+                        "generation_source": "ai_replacement",
+                    },
+                ),
+            )
+        except ValueError as err:
+            await callback.answer(str(err), show_alert=True)
+            return
+
+        await _clear_replacement_candidates(state, planned_meal_item_id)
+        await _edit_callback_message(
+            callback,
+            text=_render_item_view(apply_result.updated_item),
+            reply_markup=build_plan_item_keyboard(
+                apply_result.updated_item.weekly_plan_id,
+                apply_result.updated_item.meal_date,
+                apply_result.updated_item.planned_meal_id,
+                apply_result.updated_item.planned_meal_item_id,
             ),
         )
 
@@ -179,12 +306,14 @@ async def _edit_callback_message(
     *,
     text: str,
     reply_markup: InlineKeyboardMarkup,
+    answer_callback: bool = True,
 ) -> None:
     if callback.message is None or not isinstance(callback.message, Message):
         await callback.answer("Сообщение для обновления не найдено.", show_alert=True)
         return
     await callback.message.edit_text(text, reply_markup=reply_markup)
-    await callback.answer()
+    if answer_callback:
+        await callback.answer()
 
 
 def _render_day_view(day_view: StoredPlanDayView) -> str:
@@ -205,6 +334,31 @@ def _render_day_view(day_view: StoredPlanDayView) -> str:
             lines.append(f"Заметка: {meal.note}")
     lines.append("")
     lines.append("Выбери прием пищи, чтобы спуститься к блюдам.")
+    return "\n".join(lines)
+
+
+def _render_replacement_candidates(
+    item_view: StoredPlanItemView,
+    candidates: list[ReplacementCandidate],
+) -> str:
+    lines = [
+        f"Замена для блюда: {item_view.name}",
+        f"{_format_date(item_view.meal_date)} · {_render_slot_name(item_view.slot)}",
+    ]
+    for index, candidate in enumerate(candidates, start=1):
+        lines.extend(
+            [
+                "",
+                f"{index}. {candidate.name}",
+                candidate.summary,
+            ],
+        )
+        if candidate.reason:
+            lines.append(f"Почему подходит: {candidate.reason}")
+        if candidate.adaptation_notes:
+            lines.append(f"Адаптации: {', '.join(candidate.adaptation_notes)}")
+    lines.append("")
+    lines.append("Выбери вариант кнопкой ниже.")
     return "\n".join(lines)
 
 
@@ -300,3 +454,65 @@ def _require_telegram_user_id_from_callback(callback: CallbackQuery) -> int:
     if callback.from_user is None:
         raise ValueError("Telegram user context is required")
     return callback.from_user.id
+
+
+def _require_callback_message(callback: CallbackQuery) -> Message:
+    if callback.message is None or not isinstance(callback.message, Message):
+        raise ValueError("Telegram message context is required")
+    return callback.message
+
+
+def _require_callback_bot(callback: CallbackQuery) -> Bot:
+    if callback.bot is None:
+        raise ValueError("Telegram bot context is required")
+    return callback.bot
+
+
+async def _store_replacement_candidates(
+    state: FSMContext,
+    *,
+    planned_meal_item_id: UUID,
+    candidates: list[ReplacementCandidate],
+) -> None:
+    state_data = await state.get_data()
+    replacement_candidates = cast(
+        dict[str, list[dict[str, object]]],
+        state_data.get("replacement_candidates", {}),
+    )
+    replacement_candidates[planned_meal_item_id.hex] = [
+        asdict(candidate) for candidate in candidates
+    ]
+    await state.update_data(replacement_candidates=replacement_candidates)
+
+
+async def _get_replacement_candidate(
+    state: FSMContext,
+    *,
+    planned_meal_item_id: UUID,
+    index: int,
+) -> ReplacementCandidate | None:
+    state_data = await state.get_data()
+    replacement_candidates = cast(
+        dict[str, list[dict[str, object]]],
+        state_data.get("replacement_candidates", {}),
+    )
+    candidates_payload = replacement_candidates.get(planned_meal_item_id.hex)
+    if candidates_payload is None or index < 0 or index >= len(candidates_payload):
+        return None
+    candidate_payload = candidates_payload[index]
+    return ReplacementCandidate(
+        name=cast(str, candidate_payload["name"]),
+        summary=cast(str, candidate_payload["summary"]),
+        adaptation_notes=cast(list[str], candidate_payload["adaptation_notes"]),
+        reason=cast(str | None, candidate_payload.get("reason")),
+    )
+
+
+async def _clear_replacement_candidates(state: FSMContext, planned_meal_item_id: UUID) -> None:
+    state_data = await state.get_data()
+    replacement_candidates = cast(
+        dict[str, list[dict[str, object]]],
+        state_data.get("replacement_candidates", {}),
+    )
+    replacement_candidates.pop(planned_meal_item_id.hex, None)
+    await state.update_data(replacement_candidates=replacement_candidates)

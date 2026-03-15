@@ -98,3 +98,9 @@ class RecipeHintProvider(Protocol):
         self,
         context: WeeklyPlanGenerationContext,
     ) -> list[RecipeHint]: ...
+
+    async def search_related_recipes(
+        self,
+        query: str,
+        context: WeeklyPlanGenerationContext,
+    ) -> list[RecipeHint]: ...
