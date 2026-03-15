@@ -1,3 +1,1 @@
-from aimealplanner.presentation.telegram.handlers.start import router
-
-__all__ = ["router"]
+__all__: list[str] = []

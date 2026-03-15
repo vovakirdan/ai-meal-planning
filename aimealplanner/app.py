@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.redis import RedisStorage
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -35,8 +36,8 @@ def build_runtime(settings: Settings | None = None) -> AppRuntime:
     session_factory = build_session_factory(engine)
     redis = build_redis(resolved_settings.redis_url)
     bot = Bot(token=resolved_settings.bot_token)
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_router())
+    dispatcher = Dispatcher(storage=RedisStorage(redis=redis))
+    dispatcher.include_router(build_router(session_factory))
 
     return AppRuntime(
         settings=resolved_settings,
