@@ -59,7 +59,7 @@ def build_onboarding_router(
         result = await service.start_onboarding(telegram_user_id)
         if result.already_completed:
             await message.answer(
-                ("Профиль уже настроен.\nПозже здесь появятся план недели и настройки."),
+                ("Профиль уже настроен.\nМожно перейти к плану недели командой /plan."),
                 reply_markup=remove_keyboard(),
             )
             return
@@ -82,7 +82,7 @@ def build_onboarding_router(
     async def handle_cancel(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
-            "Ок, текущий онбординг остановлен. Чтобы начать заново, отправь /start.",
+            "Текущий сценарий остановлен. Чтобы начать заново, отправь /start или /plan.",
             reply_markup=remove_keyboard(),
         )
 
@@ -506,7 +506,7 @@ async def _finish_onboarding(
             "Онбординг завершен.\n"
             "Сохранил состав семьи: "
             f"{', '.join(member_names) if member_names else 'без участников'}.\n"
-            "Дальше здесь появится составление плана на неделю."
+            "Теперь можно перейти к плану недели командой /plan."
         ),
         reply_markup=remove_keyboard(),
     )
