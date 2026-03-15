@@ -18,6 +18,9 @@ from aimealplanner.presentation.telegram.handlers.recipe import (
 from aimealplanner.presentation.telegram.handlers.review import (
     build_review_router,
 )
+from aimealplanner.presentation.telegram.handlers.settings import (
+    build_settings_router,
+)
 from aimealplanner.presentation.telegram.handlers.shopping import (
     build_shopping_router,
 )
@@ -31,6 +34,7 @@ def build_router(
 ) -> Router:
     router = Router(name="root")
     router.include_router(build_onboarding_router(session_factory))
+    router.include_router(build_settings_router(session_factory))
     router.include_router(
         build_planning_router(
             session_factory,

@@ -7,9 +7,13 @@ from aimealplanner.infrastructure.db.repositories.planning import (
 from aimealplanner.infrastructure.db.repositories.reminders import (
     build_reminder_repository,
 )
+from aimealplanner.infrastructure.db.repositories.settings import (
+    build_settings_repository,
+)
 
 __all__ = [
     "build_onboarding_repositories",
     "build_planning_repositories",
     "build_reminder_repository",
+    "build_settings_repository",
 ]
