@@ -45,6 +45,11 @@ from aimealplanner.application.planning.replacement_dto import (
 from aimealplanner.application.planning.replacement_service import (
     DishReplacementService,
 )
+from aimealplanner.application.planning.replanning_service import (
+    PlanReplanningService,
+    ReplannedDayResult,
+    ReplannedMealResult,
+)
 from aimealplanner.application.planning.service import PlanningService
 from aimealplanner.application.planning.shopping_dto import (
     ShoppingListItemDraft,
@@ -67,6 +72,7 @@ __all__ = [
     "PlanConfirmationResult",
     "PlanDraftInput",
     "PlanDraftResult",
+    "PlanReplanningService",
     "PlannedMealItemReplacement",
     "PlanningBrowsingService",
     "PlanningService",
@@ -82,6 +88,8 @@ __all__ = [
     "RenderablePlanOverview",
     "ReplacementCandidate",
     "ReplacementSuggestionResult",
+    "ReplannedDayResult",
+    "ReplannedMealResult",
     "ReviewDayOption",
     "ReviewDaySession",
     "ReviewQueueEntry",

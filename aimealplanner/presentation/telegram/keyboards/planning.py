@@ -35,6 +35,8 @@ _PLAN_POLICY_PREFIX = "pp"
 _PLAN_SUGGESTED_ACTION_PREFIX = "ps"
 _PLAN_REJECT_FLOW_PREFIX = "pn"
 _PLAN_CONFIRM_PREFIX = "pf"
+_PLAN_REPLAN_DAY_PREFIX = "rd"
+_PLAN_REPLAN_MEAL_PREFIX = "rm"
 
 
 def build_range_choice_keyboard() -> ReplyKeyboardMarkup:
@@ -95,6 +97,7 @@ def build_plan_days_keyboard(
 
 def build_plan_day_keyboard(
     weekly_plan_id: UUID,
+    meal_date: date,
     meals: list[tuple[UUID, str]],
 ) -> InlineKeyboardMarkup:
     rows = [
@@ -109,6 +112,14 @@ def build_plan_day_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
+                text="Пересобрать день",
+                callback_data=build_plan_replan_day_callback(weekly_plan_id, meal_date),
+            ),
+        ],
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
                 text="Назад к дням",
                 callback_data=build_plan_week_callback(weekly_plan_id),
             ),
@@ -120,6 +131,7 @@ def build_plan_day_keyboard(
 def build_plan_meal_keyboard(
     weekly_plan_id: UUID,
     meal_date: date,
+    planned_meal_id: UUID,
     items: list[tuple[UUID, str]],
 ) -> InlineKeyboardMarkup:
     rows = [
@@ -131,6 +143,14 @@ def build_plan_meal_keyboard(
         ]
         for planned_meal_item_id, label in items
     ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Пересобрать прием пищи",
+                callback_data=build_plan_replan_meal_callback(planned_meal_id),
+            ),
+        ],
+    )
     rows.append(
         [
             InlineKeyboardButton(
@@ -333,6 +353,14 @@ def build_plan_confirm_callback(weekly_plan_id: UUID) -> str:
     return f"{_PLAN_CONFIRM_PREFIX}:{weekly_plan_id.hex}"
 
 
+def build_plan_replan_day_callback(weekly_plan_id: UUID, meal_date: date) -> str:
+    return f"{_PLAN_REPLAN_DAY_PREFIX}:{weekly_plan_id.hex}:{meal_date.strftime('%Y%m%d')}"
+
+
+def build_plan_replan_meal_callback(planned_meal_id: UUID) -> str:
+    return f"{_PLAN_REPLAN_MEAL_PREFIX}:{planned_meal_id.hex}"
+
+
 def parse_plan_week_callback(value: str) -> UUID | None:
     return _parse_uuid_callback(value, prefix=_PLAN_WEEK_PREFIX, expected_parts=2)
 
@@ -440,6 +468,28 @@ def parse_plan_reject_flow_callback(value: str) -> tuple[UUID, str] | None:
 
 def parse_plan_confirm_callback(value: str) -> UUID | None:
     return _parse_uuid_callback(value, prefix=_PLAN_CONFIRM_PREFIX, expected_parts=2)
+
+
+def parse_plan_replan_day_callback(value: str) -> tuple[UUID, date] | None:
+    parts = value.split(":")
+    if len(parts) != 3 or parts[0] != _PLAN_REPLAN_DAY_PREFIX:
+        return None
+    weekly_plan_id = _parse_uuid_hex(parts[1])
+    if weekly_plan_id is None:
+        return None
+    try:
+        meal_date = date(
+            year=int(parts[2][0:4]),
+            month=int(parts[2][4:6]),
+            day=int(parts[2][6:8]),
+        )
+    except ValueError:
+        return None
+    return (weekly_plan_id, meal_date)
+
+
+def parse_plan_replan_meal_callback(value: str) -> UUID | None:
+    return _parse_uuid_callback(value, prefix=_PLAN_REPLAN_MEAL_PREFIX, expected_parts=2)
 
 
 def _parse_uuid_callback(value: str, *, prefix: str, expected_parts: int) -> UUID | None:

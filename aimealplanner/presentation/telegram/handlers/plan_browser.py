@@ -10,6 +10,7 @@ from uuid import UUID
 
 from aiogram import F, Router
 from aiogram.client.bot import Bot
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
@@ -22,6 +23,7 @@ from aimealplanner.application.planning import (
     PlannedMealItemReplacement,
     PlanningBrowsingService,
     PlanningService,
+    PlanReplanningService,
     RecipeService,
     ReplacementCandidate,
 )
@@ -54,6 +56,8 @@ from aimealplanner.presentation.telegram.keyboards.planning import (
     parse_plan_reject_flow_callback,
     parse_plan_replace_callback,
     parse_plan_replace_choose_callback,
+    parse_plan_replan_day_callback,
+    parse_plan_replan_meal_callback,
     parse_plan_suggested_action_callback,
     parse_plan_week_callback,
 )
@@ -87,6 +91,12 @@ def build_plan_browser_router(
         session_factory,
         build_planning_repositories,
         suggestion_client=weekly_plan_generator,
+        recipe_hint_provider=recipe_hint_provider,
+    )
+    replanning_service = PlanReplanningService(
+        session_factory,
+        build_planning_repositories,
+        generation_client=weekly_plan_generator,
         recipe_hint_provider=recipe_hint_provider,
     )
 
@@ -212,6 +222,7 @@ def build_plan_browser_router(
             text=_render_day_view(day_view),
             reply_markup=build_plan_day_keyboard(
                 day_view.weekly_plan_id,
+                day_view.meal_date,
                 [
                     (meal.planned_meal_id, _render_meal_button_label(meal.slot, meal.item_names))
                     for meal in day_view.meals
@@ -242,11 +253,105 @@ def build_plan_browser_router(
             reply_markup=build_plan_meal_keyboard(
                 meal_view.weekly_plan_id,
                 meal_view.meal_date,
+                meal_view.planned_meal_id,
                 [
                     (item.planned_meal_item_id, f"{item.position + 1}. {item.name}")
                     for item in meal_view.items
                 ],
             ),
+        )
+
+    @router.callback_query(F.data.startswith("rd:"))
+    async def handle_plan_replan_day_callback(callback: CallbackQuery) -> None:
+        callback_data = cast(str, callback.data)
+        parsed_value = parse_plan_replan_day_callback(callback_data)
+        if parsed_value is None:
+            await callback.answer("Не получилось пересобрать день.", show_alert=True)
+            return
+
+        weekly_plan_id, meal_date = parsed_value
+        message = _require_callback_message(callback)
+        await callback.answer("Пересобираю день...")
+        async with ChatActionSender.typing(
+            bot=_require_callback_bot(callback),
+            chat_id=message.chat.id,
+        ):
+            try:
+                replanned_day = await replanning_service.replan_day(
+                    _require_telegram_user_id_from_callback(callback),
+                    weekly_plan_id,
+                    meal_date,
+                )
+            except ValueError as err:
+                await message.answer(str(err))
+                return
+            except Exception:
+                logger.exception(
+                    "failed to replan day %s for weekly_plan_id=%s",
+                    meal_date.isoformat(),
+                    weekly_plan_id,
+                )
+                await message.answer(
+                    "Не удалось пересобрать день. Попробуй еще раз через пару секунд.",
+                )
+                return
+
+        await _edit_callback_message(
+            callback,
+            text=_render_day_view(replanned_day.updated_day),
+            reply_markup=build_plan_day_keyboard(
+                replanned_day.updated_day.weekly_plan_id,
+                replanned_day.updated_day.meal_date,
+                [
+                    (meal.planned_meal_id, _render_meal_button_label(meal.slot, meal.item_names))
+                    for meal in replanned_day.updated_day.meals
+                ],
+            ),
+            answer_callback=False,
+        )
+
+    @router.callback_query(F.data.startswith("rm:"))
+    async def handle_plan_replan_meal_callback(callback: CallbackQuery) -> None:
+        callback_data = cast(str, callback.data)
+        planned_meal_id = parse_plan_replan_meal_callback(callback_data)
+        if planned_meal_id is None:
+            await callback.answer("Не получилось пересобрать прием пищи.", show_alert=True)
+            return
+
+        message = _require_callback_message(callback)
+        await callback.answer("Пересобираю прием пищи...")
+        async with ChatActionSender.typing(
+            bot=_require_callback_bot(callback),
+            chat_id=message.chat.id,
+        ):
+            try:
+                replanned_meal = await replanning_service.replan_meal(
+                    _require_telegram_user_id_from_callback(callback),
+                    planned_meal_id,
+                )
+            except ValueError as err:
+                await message.answer(str(err))
+                return
+            except Exception:
+                logger.exception("failed to replan meal %s", planned_meal_id)
+                await message.answer(
+                    "Не удалось пересобрать прием пищи. Попробуй еще раз через пару секунд.",
+                )
+                return
+
+        await _edit_callback_message(
+            callback,
+            text=_render_meal_view(replanned_meal.updated_meal),
+            reply_markup=build_plan_meal_keyboard(
+                replanned_meal.updated_meal.weekly_plan_id,
+                replanned_meal.updated_meal.meal_date,
+                replanned_meal.updated_meal.planned_meal_id,
+                [
+                    (item.planned_meal_item_id, f"{item.position + 1}. {item.name}")
+                    for item in replanned_meal.updated_meal.items
+                ],
+            ),
+            answer_callback=False,
         )
 
     @router.callback_query(F.data.startswith("pi:"))
@@ -697,7 +802,12 @@ async def _edit_callback_message(
     if callback.message is None or not isinstance(callback.message, Message):
         await callback.answer("Сообщение для обновления не найдено.", show_alert=True)
         return
-    await callback.message.edit_text(text, reply_markup=reply_markup)
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as err:
+        if "message is not modified" not in str(err).lower():
+            raise
+        logger.info("telegram skipped message edit because content did not change")
     if answer_callback:
         await callback.answer()
 
@@ -963,6 +1073,7 @@ async def _edit_stored_meal_message(
     reply_markup = build_plan_meal_keyboard(
         meal_view.weekly_plan_id,
         meal_view.meal_date,
+        meal_view.planned_meal_id,
         [
             (item.planned_meal_item_id, f"{item.position + 1}. {item.name}")
             for item in meal_view.items

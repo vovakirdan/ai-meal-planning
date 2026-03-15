@@ -25,6 +25,7 @@ from aimealplanner.application.planning.dto import (
     StoredPlanReference,
 )
 from aimealplanner.application.planning.generation_dto import (
+    GeneratedMeal,
     GeneratedWeekPlan,
     WeeklyPlanGenerationContext,
 )
@@ -90,6 +91,21 @@ class WeeklyPlanRepository(Protocol):
     async def update_item_snapshot(
         self,
         replacement: PlannedMealItemReplacement,
+    ) -> None: ...
+
+    async def replace_meal_with_generated(
+        self,
+        household_id: UUID,
+        planned_meal_id: UUID,
+        generated_meal: GeneratedMeal,
+    ) -> None: ...
+
+    async def replace_day_with_generated(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+        meal_date: date,
+        generated_plan: GeneratedWeekPlan,
     ) -> None: ...
 
     async def ensure_item_dish(

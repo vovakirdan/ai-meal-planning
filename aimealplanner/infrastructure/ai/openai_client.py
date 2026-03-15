@@ -464,6 +464,7 @@ def _build_week_plan_prompt(context: WeeklyPlanGenerationContext) -> str:
     reference_recipes_text = _render_reference_recipes(context)
     policy_text = _render_household_policies(context.household_policies)
     member_lines = _render_household_members(context)
+    replanning_text = _render_replanning_context(context)
     expected_slots = ", ".join(context.active_slots)
     expected_meals = "\n".join(
         [
@@ -501,6 +502,9 @@ Existing household dish memory:
 Recipe references:
 {reference_recipes_text}
 
+Replanning context:
+{replanning_text}
+
 Requirements:
 - Return meals for every date/slot pair listed below.
 - Return 1-2 dish items for each meal.
@@ -514,6 +518,9 @@ Requirements:
 - suggested_actions must fit the dish and slot.
 - Example: dessert can be less sweet, but not less spicy.
 - Each suggested_actions label should be 1-3 short Russian words for a Telegram button.
+- If replanning context is provided, keep the new result compatible with it.
+- If replanning context is provided, prefer not to return the exact same dishes
+  from the current replanning scope unless they are still the best fit.
 
 Required JSON shape:
 {{
@@ -562,6 +569,38 @@ def _build_repair_prompt(
 Период: {context.start_date.isoformat()} - {context.end_date.isoformat()}
 Слоты: {", ".join(context.active_slots)}
 """.strip()
+
+
+def _render_replanning_context(context: WeeklyPlanGenerationContext) -> str:
+    scope_value = context.context_payload.get("replanning_scope")
+    if scope_value not in {"meal", "day"}:
+        return "not provided"
+
+    target_date = context.context_payload.get("replanning_target_date")
+    target_slot = context.context_payload.get("replanning_target_slot")
+    current_scope = context.context_payload.get("replanning_current_scope")
+    current_day = context.context_payload.get("replanning_current_day")
+
+    lines = [f"- scope: {scope_value}"]
+    if isinstance(target_date, str) and target_date.strip():
+        lines.append(f"- target_date: {target_date.strip()}")
+    if isinstance(target_slot, str) and target_slot.strip():
+        lines.append(f"- target_slot: {target_slot.strip()}")
+    if isinstance(current_scope, str) and current_scope.strip():
+        lines.extend(
+            [
+                "- current_scope:",
+                current_scope.strip(),
+            ],
+        )
+    if isinstance(current_day, str) and current_day.strip():
+        lines.extend(
+            [
+                "- current_day:",
+                current_day.strip(),
+            ],
+        )
+    return "\n".join(lines)
 
 
 def _build_replacement_repair_prompt(raw_content: str, error_message: str) -> str:

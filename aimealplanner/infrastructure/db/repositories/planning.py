@@ -32,6 +32,8 @@ from aimealplanner.application.planning.dto import (
 )
 from aimealplanner.application.planning.generation_dto import (
     DishQuickAction,
+    GeneratedMeal,
+    GeneratedMealItem,
     GeneratedWeekPlan,
     HouseholdDishPolicyContext,
     PlanningMemberContext,
@@ -429,6 +431,97 @@ class SqlAlchemyWeeklyPlanRepository:
         record.adaptation_notes = replacement.adaptation_notes
         if replacement.clear_dish_link:
             record.dish_id = replacement_dish_id
+        await self._session.flush()
+
+    async def replace_meal_with_generated(
+        self,
+        household_id: UUID,
+        planned_meal_id: UUID,
+        generated_meal: GeneratedMeal,
+    ) -> None:
+        statement = (
+            select(PlannedMealRecord)
+            .options(
+                selectinload(PlannedMealRecord.items),
+                selectinload(PlannedMealRecord.weekly_plan),
+            )
+            .where(PlannedMealRecord.id == planned_meal_id)
+        )
+        meal_record = await self._session.scalar(statement)
+        if meal_record is None or meal_record.weekly_plan.household_id != household_id:
+            raise ValueError("Не удалось найти выбранный прием пищи.")
+
+        if (
+            meal_record.slot.value != generated_meal.slot
+            or meal_record.meal_date != generated_meal.meal_date
+        ):
+            raise ValueError("Сгенерированный прием пищи не совпадает с выбранным слотом.")
+
+        await self._sync_generated_meal(
+            meal_record,
+            generated_meal=generated_meal,
+            confirmed=meal_record.weekly_plan.status == WeeklyPlanStatus.CONFIRMED,
+        )
+        await self._session.flush()
+
+    async def replace_day_with_generated(
+        self,
+        household_id: UUID,
+        weekly_plan_id: UUID,
+        meal_date: date,
+        generated_plan: GeneratedWeekPlan,
+    ) -> None:
+        statement = (
+            select(WeeklyPlanRecord)
+            .options(
+                selectinload(WeeklyPlanRecord.planned_meals).selectinload(
+                    PlannedMealRecord.items,
+                ),
+            )
+            .where(
+                WeeklyPlanRecord.id == weekly_plan_id,
+                WeeklyPlanRecord.household_id == household_id,
+            )
+        )
+        weekly_plan = await self._session.scalar(statement)
+        if weekly_plan is None:
+            raise ValueError("Не удалось найти выбранный план.")
+
+        generated_meals = [meal for meal in generated_plan.meals if meal.meal_date == meal_date]
+        if not generated_meals:
+            raise ValueError("Сгенерированный день не содержит приемов пищи.")
+
+        existing_meals_by_slot = {
+            meal.slot.value: meal
+            for meal in weekly_plan.planned_meals
+            if meal.meal_date == meal_date
+        }
+        generated_slots = {meal.slot for meal in generated_meals}
+        confirmed = weekly_plan.status == WeeklyPlanStatus.CONFIRMED
+
+        for generated_meal in generated_meals:
+            existing_meal = existing_meals_by_slot.get(generated_meal.slot)
+            if existing_meal is None:
+                existing_meal = PlannedMealRecord(
+                    weekly_plan_id=weekly_plan.id,
+                    meal_date=generated_meal.meal_date,
+                    slot=MealSlot(generated_meal.slot),
+                    status=PlannedMealStatus.PLANNED,
+                    note=generated_meal.note,
+                )
+                self._session.add(existing_meal)
+                await self._session.flush()
+            await self._sync_generated_meal(
+                existing_meal,
+                generated_meal=generated_meal,
+                confirmed=confirmed,
+            )
+
+        for slot, existing_meal in existing_meals_by_slot.items():
+            if slot in generated_slots:
+                continue
+            await self._session.delete(existing_meal)
+
         await self._session.flush()
 
     async def ensure_item_dish(
@@ -963,6 +1056,47 @@ class SqlAlchemyWeeklyPlanRepository:
     async def _find_or_create_dish_from_item(self, item: PlannedMealItemRecord) -> DishRecord:
         return await self._find_or_create_dish(item.snapshot_name, item.snapshot_payload)
 
+    async def _sync_generated_meal(
+        self,
+        meal_record: PlannedMealRecord,
+        *,
+        generated_meal: GeneratedMeal,
+        confirmed: bool,
+    ) -> None:
+        meal_record.note = generated_meal.note
+        meal_record.status = PlannedMealStatus.PLANNED
+
+        existing_items = sorted(meal_record.items, key=lambda item: item.position)
+        for position, generated_item in enumerate(generated_meal.items):
+            snapshot_payload = _build_generated_item_snapshot_payload(generated_item)
+            dish_id: UUID | None = None
+            if confirmed:
+                dish = await self._find_or_create_dish(generated_item.name, snapshot_payload)
+                dish_id = dish.id
+
+            if position < len(existing_items):
+                existing_item = existing_items[position]
+                existing_item.snapshot_name = generated_item.name
+                existing_item.snapshot_payload = snapshot_payload
+                existing_item.adaptation_notes = list(generated_item.adaptation_notes)
+                existing_item.dish_id = dish_id
+                continue
+
+            self._session.add(
+                PlannedMealItemRecord(
+                    planned_meal_id=meal_record.id,
+                    position=position,
+                    dish_id=dish_id,
+                    snapshot_name=generated_item.name,
+                    snapshot_payload=snapshot_payload,
+                    adaptation_notes=list(generated_item.adaptation_notes),
+                ),
+            )
+
+        for stale_item in existing_items[len(generated_meal.items) :]:
+            await self._session.delete(stale_item)
+        await self._session.flush()
+
     async def _find_or_create_dish(
         self,
         snapshot_name: str,
@@ -1045,6 +1179,20 @@ def _sort_meal_record(meal: PlannedMealRecord) -> tuple[int, str]:
 
 def _normalize_name(value: str) -> str:
     return _WHITESPACE_PATTERN.sub(" ", value.strip()).lower()
+
+
+def _build_generated_item_snapshot_payload(item: GeneratedMealItem) -> dict[str, Any]:
+    return {
+        "summary": item.summary,
+        "generation_source": "weekly_plan_ai",
+        "suggested_actions": [
+            {
+                "label": action.label,
+                "instruction": action.instruction,
+            }
+            for action in item.suggested_actions
+        ],
+    }
 
 
 def _build_dish_canonical_key(snapshot_name: str, snapshot_payload: dict[str, Any]) -> str | None:
